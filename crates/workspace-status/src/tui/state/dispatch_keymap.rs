@@ -794,6 +794,9 @@ impl AppState {
                 ListFocusTarget::Tree | ListFocusTarget::CommitFiles
             ))
             .then(|| super::Z_FOLDS_TREE_ROWS.into()),
+            Action::FocusThisFeature | Action::FocusThisRepo | Action::FocusClear => {
+                self.focus_palette_reason(action)
+            }
             _ => None,
         }
     }

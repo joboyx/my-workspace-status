@@ -73,6 +73,11 @@ impl AppState {
             | Action::GraphFocusSubmit
             | Action::StashMenu
             | Action::StashMenuEnter => SWITCH_TO_WORKSPACE_TAB,
+            // The tree focus narrows the Workspace tree.
+            Action::FocusThisFeature
+            | Action::FocusThisRepo
+            | Action::FocusClear
+            | Action::FocusPromptOpen => SWITCH_TO_WORKSPACE_TAB,
             // `x` writes the worktree only while the compare head is the
             // checked-out working tree for the file.
             Action::Revert => return self.compare_revert_target().err(),
@@ -255,6 +260,14 @@ impl AppState {
             | Action::PopoverClose) => self.dispatch_popover(action),
             // `dispatch` already ended the chord above.
             Action::GChordCancel => Effect::None,
+            action @ (Action::FocusThisFeature
+            | Action::FocusThisRepo
+            | Action::FocusClear
+            | Action::FocusPromptOpen
+            | Action::FocusPromptChar(_)
+            | Action::FocusPromptBackspace
+            | Action::FocusPromptSubmit
+            | Action::FocusPromptCancel) => self.dispatch_focus(action),
             // Report-only, from every tab: no gate above refuses these.
             action @ (Action::OpenDoctor
             | Action::DoctorMove(_)

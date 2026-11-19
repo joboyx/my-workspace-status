@@ -1,12 +1,16 @@
 //! Persist TUI view state (last-used theme, activity sparkline, commit
-//! message rows, ignore whitespace) in a state file.
+//! message rows, ignore whitespace, tree focus per workspace) in a state
+//! file.
 //!
 //! The theme that a palette `Theme: …` row sets, the activity sparkline
-//! toggle, the commit-message footer height a mouse drag sets, and the
-//! last "ignore whitespace" diff setting are state, not config: they live in one JSON file
+//! toggle, the commit-message footer height a mouse drag sets, the
+//! last "ignore whitespace" diff setting, and the tree focus query of each
+//! workspace root are state, not config: they live in one JSON file
 //! (`$XDG_STATE_HOME/my-workspace-status/ui-state.json`) and the user config
 //! file is never written. [`crate::settings::Settings`] loads it at launch;
-//! see [`super::theme::theme_id_from`] for the theme precedence.
+//! see [`super::theme::theme_id_from`] for the theme precedence. The tree
+//! focus has its own load and save ([`load_tree_focus`],
+//! [`save_tree_focus`]), keyed by [`super::viewed::workspace_store_id`].
 
 use std::fs;
 use std::io;
@@ -17,6 +21,7 @@ use workspace_status_graph::{COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN};
 
 use super::persist::persist_with_lock;
 use super::theme::{parse_theme_id, ThemeId};
+use super::tree_focus::TreeFocus;
 
 /// On-disk store version written by save. Load accepts only this version.
 pub const UI_STATE_STORE_VERSION: u32 = 1;
@@ -26,18 +31,22 @@ const STORE_FILE_NAME: &str = "ui-state.json";
 
 /// On-disk shape:
 /// `{"version": 1, "theme": "<slug>", "activitySparkline": false,
-/// "commitMessageLines": 6, "ignoreWhitespace": true}`.
+/// "commitMessageLines": 6, "ignoreWhitespace": true,
+/// "treeFocus": {"<workspace store id>": "<query>"}}`.
 ///
 /// `version` is required; `theme`, `activitySparkline`,
-/// `commitMessageLines`, and `ignoreWhitespace` are optional. An object with
-/// any other key (for example a config file that also has `version` and
-/// `theme`) is not a store: load ignores it and save leaves it unchanged.
-/// Save keeps the raw `theme` string and the raw `commitMessageLines` and
-/// `ignoreWhitespace` JSON values, so an unknown slug or a bad value
-/// survives a save of another key. `commitMessageLines` and
-/// `ignoreWhitespace` take any JSON value here: a bad value is only that
-/// key unset ([`saved_commit_msg_lines`], [`saved_ignore_whitespace`]),
-/// never the whole file foreign.
+/// `commitMessageLines`, `ignoreWhitespace`, and `treeFocus` are optional.
+/// An object with any other key (for example a config file that also has
+/// `version` and `theme`) is not a store: load ignores it and save leaves it
+/// unchanged. Save keeps the raw `theme` string and the raw
+/// `commitMessageLines`, `ignoreWhitespace`, and `treeFocus` JSON values, so
+/// an unknown slug or a bad value survives a save of another key.
+/// `commitMessageLines`, `ignoreWhitespace`, and `treeFocus` take any JSON
+/// value here: a bad value is only that key unset
+/// ([`saved_commit_msg_lines`], [`saved_ignore_whitespace`],
+/// [`saved_tree_focus`]), never the whole file foreign. `treeFocus` maps a
+/// workspace store id to its raw focus query; a bad entry is only that
+/// workspace unset.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct StoreFile {
@@ -50,6 +59,8 @@ struct StoreFile {
     commit_message_lines: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ignore_whitespace: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tree_focus: Option<serde_json::Value>,
 }
 
 /// The view state the TUI restores at launch.
@@ -77,6 +88,14 @@ pub struct UiState {
 /// reads as not saved.
 fn saved_ignore_whitespace(value: Option<&serde_json::Value>) -> Option<bool> {
     value?.as_bool()
+}
+
+/// The saved focus query of `workspace_id` when `treeFocus` is a JSON
+/// object and its entry for that id is a JSON string; any other value reads
+/// as not saved.
+fn saved_tree_focus(value: Option<&serde_json::Value>, workspace_id: &str) -> Option<String> {
+    let query = value?.as_object()?.get(workspace_id)?.as_str()?;
+    Some(query.to_string())
 }
 
 /// The saved `commitMessageLines` when it is a JSON integer in
@@ -233,6 +252,55 @@ pub fn save_commit_msg_lines(path: &Path, lines: usize) -> io::Result<()> {
 pub fn save_ignore_whitespace(path: &Path, on: bool) -> io::Result<()> {
     update_store(path, |file| {
         file.ignore_whitespace = Some(serde_json::Value::Bool(on));
+    })
+}
+
+/// The tree focus query saved for the workspace root `workspace_id` (a
+/// [`super::viewed::workspace_store_id`]).
+///
+/// `None` when the file is missing, unreadable, foreign, or has another
+/// version (the [`load_ui_state`] rules), when `treeFocus` is not a JSON
+/// object, when the workspace has no entry, when its entry is not a JSON
+/// string, or when the query has no terms ([`TreeFocus::is_empty`]). A bad
+/// value never changes what the other keys load.
+pub fn load_tree_focus(path: &Path, workspace_id: &str) -> Option<String> {
+    let parsed = fs::read(path).ok().and_then(|bytes| parse_store(&bytes))?;
+    if parsed.version != UI_STATE_STORE_VERSION {
+        return None;
+    }
+    saved_tree_focus(parsed.tree_focus.as_ref(), workspace_id)
+        .filter(|query| !TreeFocus::parse(query).is_empty())
+}
+
+/// Persist the tree focus `query` of the workspace root `workspace_id` (a
+/// [`super::viewed::workspace_store_id`]), and keep the other stored keys
+/// and the entries of other workspaces as they are.
+///
+/// `None`, or a query with no terms ([`TreeFocus::is_empty`]), removes the
+/// workspace's entry; when that leaves no entry, the `treeFocus` key is
+/// dropped from the file. A `treeFocus` value that is not a JSON object is
+/// replaced by a new object on a save of a query, and left as is on a
+/// removal. The user config file is never written. See [`update_store`]
+/// for the create, foreign-file, and lock rules.
+pub fn save_tree_focus(path: &Path, workspace_id: &str, query: Option<&str>) -> io::Result<()> {
+    let query = query.filter(|q| !TreeFocus::parse(q).is_empty());
+    update_store(path, |file| match query {
+        Some(query) => {
+            let mut entries = match file.tree_focus.take() {
+                Some(serde_json::Value::Object(entries)) => entries,
+                _ => serde_json::Map::new(),
+            };
+            entries.insert(workspace_id.to_string(), query.into());
+            file.tree_focus = Some(serde_json::Value::Object(entries));
+        }
+        None => {
+            if let Some(serde_json::Value::Object(entries)) = file.tree_focus.as_mut() {
+                entries.remove(workspace_id);
+                if entries.is_empty() {
+                    file.tree_focus = None;
+                }
+            }
+        }
     })
 }
 
@@ -503,11 +571,15 @@ mod tests {
     fn save_never_overwrites_a_file_that_is_not_the_store() {
         let (dir, path) = temp_store();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let saves: [(&str, Save); 4] = [
+        let saves: [(&str, Save); 6] = [
             ("theme", |p| save_theme(p, ThemeId::Monokai)),
             ("sparkline", |p| save_activity_sparkline(p, true)),
             ("commit message lines", |p| save_commit_msg_lines(p, 6)),
             ("ignore whitespace", |p| save_ignore_whitespace(p, true)),
+            ("tree focus", |p| {
+                save_tree_focus(p, "ws-a", Some("ABC-123"))
+            }),
+            ("tree focus clear", |p| save_tree_focus(p, "ws-a", None)),
         ];
         for (name, save) in saves {
             for body in [
@@ -761,6 +833,190 @@ mod tests {
             save_ignore_whitespace(&path, true).unwrap();
             assert_eq!(load_ui_state(&path).ignore_whitespace, Some(true), "{bad}");
         }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The focus of each workspace root is its own entry: two roots share
+    /// one file, a clear of one keeps the other, the last clear drops the
+    /// `treeFocus` key, and the theme and other keys survive each save.
+    #[test]
+    fn tree_focus_is_saved_per_workspace_root_and_keeps_the_other_keys() {
+        let (dir, path) = temp_store();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "{\"version\":1,\"theme\":\"solarized\",\"activitySparkline\":true,\"commitMessageLines\":7}\n",
+        )
+        .unwrap();
+        assert_eq!(load_tree_focus(&path, "ws-a"), None, "absent key");
+
+        save_tree_focus(&path, "ws-a", Some("ABC-123")).unwrap();
+        save_tree_focus(&path, "ws-b", Some("app, lib")).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\n  \"version\": 1,\n  \"theme\": \"solarized\",\n  \"activitySparkline\": true,\n  \"commitMessageLines\": 7,\n  \"treeFocus\": {\n    \"ws-a\": \"ABC-123\",\n    \"ws-b\": \"app, lib\"\n  }\n}\n",
+            "unknown slug kept as is; raw query kept"
+        );
+        assert_eq!(load_tree_focus(&path, "ws-a").as_deref(), Some("ABC-123"));
+        assert_eq!(load_tree_focus(&path, "ws-b").as_deref(), Some("app, lib"));
+        assert_eq!(load_tree_focus(&path, "ws-c"), None);
+
+        save_theme(&path, ThemeId::Nord).unwrap();
+        save_ignore_whitespace(&path, true).unwrap();
+        assert_eq!(
+            load_tree_focus(&path, "ws-a").as_deref(),
+            Some("ABC-123"),
+            "other saves keep the focus"
+        );
+        assert_eq!(
+            load_ui_state(&path),
+            UiState {
+                theme: Some(ThemeId::Nord),
+                activity_sparkline: true,
+                commit_msg_lines: Some(7),
+                ignore_whitespace: Some(true),
+            },
+            "a focus key does not change the view state"
+        );
+
+        save_tree_focus(&path, "ws-a", Some("billing")).unwrap();
+        assert_eq!(load_tree_focus(&path, "ws-a").as_deref(), Some("billing"));
+
+        save_tree_focus(&path, "ws-a", None).unwrap();
+        assert_eq!(load_tree_focus(&path, "ws-a"), None, "cleared");
+        assert_eq!(
+            load_tree_focus(&path, "ws-b").as_deref(),
+            Some("app, lib"),
+            "the other root keeps its focus"
+        );
+
+        save_tree_focus(&path, "ws-b", Some(" , ")).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\n  \"version\": 1,\n  \"theme\": \"nord\",\n  \"activitySparkline\": true,\n  \"commitMessageLines\": 7,\n  \"ignoreWhitespace\": true\n}\n",
+            "a query with no terms clears; the last clear drops the key"
+        );
+        save_tree_focus(&path, "ws-b", None).unwrap();
+        assert_eq!(load_tree_focus(&path, "ws-b"), None, "clear of no entry");
+
+        let (fresh_dir, fresh) = temp_store();
+        save_tree_focus(&fresh, "ws-a", Some("ABC-123")).unwrap();
+        assert_eq!(
+            fs::read_to_string(&fresh).unwrap(),
+            "{\n  \"version\": 1,\n  \"activitySparkline\": false,\n  \"treeFocus\": {\n    \"ws-a\": \"ABC-123\"\n  }\n}\n",
+            "a missing file (and its parent dirs) gets only the focus"
+        );
+        let _ = fs::remove_dir_all(fresh_dir);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A `treeFocus` that is not an object, or an entry that is not a
+    /// string, loads as no focus; the other keys still load, a save of
+    /// another key keeps the bad value as is, a focus save replaces it, and
+    /// a clear leaves it.
+    #[test]
+    fn bad_tree_focus_is_no_focus_and_the_rest_still_loads() {
+        let (dir, path) = temp_store();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for bad in [
+            "\"ABC-123\"",
+            "1",
+            "true",
+            "null",
+            "[\"ws-a\"]",
+            "{\"ws-a\":1}",
+            "{\"ws-a\":null}",
+            "{\"ws-a\":[\"ABC-123\"]}",
+            "{\"ws-a\":\" , \"}",
+        ] {
+            let body = format!(
+                "{{\"version\":1,\"theme\":\"nord\",\"activitySparkline\":true,\"treeFocus\":{bad}}}\n"
+            );
+            fs::write(&path, &body).unwrap();
+            assert_eq!(load_tree_focus(&path, "ws-a"), None, "{bad}");
+            assert_eq!(
+                load_ui_state(&path),
+                UiState {
+                    theme: Some(ThemeId::Nord),
+                    activity_sparkline: true,
+                    commit_msg_lines: None,
+                    ignore_whitespace: None,
+                },
+                "{bad}"
+            );
+            assert_eq!(check_ui_state_bytes(body.as_bytes()), Ok(()), "{bad}");
+
+            save_activity_sparkline(&path, false).unwrap();
+            save_tree_focus(&path, "ws-a", None).unwrap();
+            let kept = fs::read_to_string(&path).unwrap();
+            let compact: String = kept.chars().filter(|c| !c.is_whitespace()).collect();
+            if bad == "null" {
+                assert!(!kept.contains("treeFocus"), "{kept}");
+            } else if bad.starts_with('{') {
+                assert!(
+                    !kept.contains("treeFocus"),
+                    "{bad}: the clear drops it: {kept}"
+                );
+            } else {
+                let bad_compact: String = bad.chars().filter(|c| !c.is_whitespace()).collect();
+                assert!(
+                    compact.contains(&format!("\"treeFocus\":{bad_compact}")),
+                    "{bad}: kept as is: {kept}"
+                );
+            }
+
+            save_tree_focus(&path, "ws-a", Some("ABC-123")).unwrap();
+            assert_eq!(
+                load_tree_focus(&path, "ws-a").as_deref(),
+                Some("ABC-123"),
+                "{bad}"
+            );
+        }
+
+        fs::write(
+            &path,
+            "{\"version\":1,\"treeFocus\":{\"ws-a\":7,\"ws-b\":\"lib\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(load_tree_focus(&path, "ws-a"), None);
+        assert_eq!(
+            load_tree_focus(&path, "ws-b").as_deref(),
+            Some("lib"),
+            "a bad entry is only that workspace unset"
+        );
+        save_tree_focus(&path, "ws-b", None).unwrap();
+        let compact: String = fs::read_to_string(&path)
+            .unwrap()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(compact.contains("\"treeFocus\":{\"ws-a\":7}"), "{compact}");
+
+        for body in [
+            "{\"version\":2,\"treeFocus\":{\"ws-a\":\"ABC-123\"}}\n",
+            "{\"version\":1,\"treeFocus\":{\"ws-a\":\"ABC-123\"},\"ignoredRepos\":[]}\n",
+            "{not json",
+        ] {
+            fs::write(&path, body).unwrap();
+            assert_eq!(load_tree_focus(&path, "ws-a"), None, "{body:?}");
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A focus save never writes the user config file: a config path that
+    /// is not a store is left byte-identical.
+    #[test]
+    fn tree_focus_save_leaves_a_config_file_untouched() {
+        let (dir, path) = temp_store();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let config = "{\"theme\":\"tokyo-night\",\"hiddenPaths\":[\"vendor\"]}\n";
+        fs::write(&path, config).unwrap();
+        for query in [Some("ABC-123"), None] {
+            let err = save_tree_focus(&path, "ws-a", query).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{query:?}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), config, "{query:?}");
+        }
+        assert_eq!(load_tree_focus(&path, "ws-a"), None);
         let _ = fs::remove_dir_all(dir);
     }
 }

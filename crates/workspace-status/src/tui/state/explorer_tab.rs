@@ -305,7 +305,11 @@ impl AppState {
             Action::ToggleTreeMode
             | Action::ToggleShowHidden
             | Action::ToggleCommitMsgExpand
-            | Action::ResizeCommitMsg(_) => return Some(SWITCH_TO_WORKSPACE_TAB.into()),
+            | Action::ResizeCommitMsg(_)
+            | Action::FocusThisFeature
+            | Action::FocusThisRepo
+            | Action::FocusClear
+            | Action::FocusPromptOpen => return Some(SWITCH_TO_WORKSPACE_TAB.into()),
             Action::ToggleFullContext => return Some(EXPLORER_DIFFS_SHOW_WHOLE_FILE.into()),
             Action::CommentStart | Action::DiffVisualStart
                 if self.list_focus_target() != ListFocusTarget::None =>

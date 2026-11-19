@@ -500,6 +500,9 @@ pub enum DialogKind {
     BlameMenu,
     /// Graph `c` create-branch prompt.
     CreateBranch,
+    /// Tree focus prompt (`Focus: type a query…`). The panes behind it do
+    /// not dim: the tree previews the draft live.
+    FocusPrompt,
     /// Comment textarea.
     Comment,
     /// Comment export result.
@@ -522,7 +525,7 @@ pub enum DialogKind {
 /// the bottom chrome paint.
 ///
 /// Same order as the render if-chain: help, confirm, stash, blame menu,
-/// create branch, comment, export, then the list pickers, the palette, and
+/// create branch, focus prompt, comment, export, then the list pickers, the palette, and
 /// search in files, then the Doctor.
 pub fn open_dialog(state: &AppState) -> Option<DialogKind> {
     if state.help_open {
@@ -535,6 +538,8 @@ pub fn open_dialog(state: &AppState) -> Option<DialogKind> {
         Some(DialogKind::BlameMenu)
     } else if state.create_branch.is_some() {
         Some(DialogKind::CreateBranch)
+    } else if state.focus_prompt.is_some() {
+        Some(DialogKind::FocusPrompt)
     } else if state.comment.is_some() {
         Some(DialogKind::Comment)
     } else if state.comment_export.is_some() {
@@ -640,6 +645,8 @@ pub fn dialog_height(state: &AppState, kind: DialogKind, width: u16) -> u16 {
         DialogKind::BlameMenu => 4 + BLAME_MENU_ROWS.len() as u16,
         // Border, title, name, the status row (`create {name}`), and the footer.
         DialogKind::CreateBranch => 6,
+        // Border, title, query, the preview count, and the footer.
+        DialogKind::FocusPrompt => 6,
         // Room for the most body lines; fewer lines leave blank rows.
         DialogKind::Comment => COMMENT_OVERLAY_CHROME_ROWS + COMMENT_OVERLAY_MAX_BODY_LINES as u16,
         DialogKind::CommentExport => 20,
@@ -969,21 +976,28 @@ fn scope_action_visible(
         HintActionId::Revert => collect_write_files(&state.snapshot, focused, state.show_hidden)
             .iter()
             .any(|file| file.change.unstaged_status.is_some() || file.change.untracked),
-        HintActionId::Pull => op_targets(&state.snapshot, focused, state.show_hidden, Op::Pull)
-            .into_iter()
-            .any(|repo| {
-                state
-                    .snapshot
-                    .repos
-                    .iter()
-                    .any(|row| row.repo == repo && row.sync_status == SyncStatus::Behind)
-            }),
+        HintActionId::Pull => op_targets(
+            &state.snapshot,
+            focused,
+            state.show_hidden,
+            Op::Pull,
+            state.op_focus_split(focused).as_ref(),
+        )
+        .into_iter()
+        .any(|repo| {
+            state
+                .snapshot
+                .repos
+                .iter()
+                .any(|row| row.repo == repo && row.sync_status == SyncStatus::Behind)
+        }),
         HintActionId::Push => !push_targets(&state.snapshot, focused, state.show_hidden).is_empty(),
         HintActionId::DefaultBranch => op_targets(
             &state.snapshot,
             focused,
             state.show_hidden,
             Op::DefaultBranch,
+            state.op_focus_split(focused).as_ref(),
         )
         .into_iter()
         .any(|repo| {
@@ -2572,7 +2586,7 @@ mod tests {
             tally.note(repo, RepoOpResult::Ok);
         }
         tally.note("app", RepoOpResult::Failed("timeout".into()));
-        app.status = StatusMessage::error(format_completed_op(RunningOp::Fetch, &tally));
+        app.status = StatusMessage::error(format_completed_op(RunningOp::Fetch, &tally, None));
         let crumb = line_plain(&breadcrumb_line(&app, 80));
         assert!(
             crumb.contains("Fetched 4 repos (1 failed: app — timeout)"),

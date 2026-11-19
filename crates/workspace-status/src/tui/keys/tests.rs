@@ -787,6 +787,41 @@ fn enter_esc_and_graph_stash_keys() {
     );
 }
 
+/// `*` focuses the feature in normal mode; the focus prompt types every
+/// printable key (`,`, space, `*`, `q`), and Enter / Esc / Backspace edit
+/// or close it. The mouse does nothing while it is open.
+#[test]
+fn star_focuses_and_the_focus_prompt_types_every_printable_key() {
+    let normal = InputMode::Normal {
+        search_active: false,
+    };
+    assert_eq!(
+        event_to_action(&key(KeyCode::Char('*')), normal, false, false),
+        Action::FocusThisFeature
+    );
+    assert_eq!(
+        event_to_action(&shift(KeyCode::Char('*')), normal, false, false),
+        Action::FocusThisFeature,
+        "a terminal may report `*` with Shift"
+    );
+    let at = |event: &Event| event_to_action(event, InputMode::FocusPrompt, false, false);
+    for c in [',', ' ', '*', 'q', '?', 'j'] {
+        assert_eq!(
+            at(&key(KeyCode::Char(c))),
+            Action::FocusPromptChar(c),
+            "{c:?}"
+        );
+    }
+    assert_eq!(at(&key(KeyCode::Enter)), Action::FocusPromptSubmit);
+    assert_eq!(at(&key(KeyCode::Esc)), Action::FocusPromptCancel);
+    assert_eq!(at(&key(KeyCode::Backspace)), Action::FocusPromptBackspace);
+    assert_eq!(at(&ctrl(KeyCode::Char('a'))), Action::None);
+    assert_eq!(
+        at(&mouse(MouseEventKind::Down(MouseButton::Left), 3, 3)),
+        Action::None
+    );
+}
+
 fn mouse(kind: MouseEventKind, col: u16, row: u16) -> Event {
     mouse_mods(kind, col, row, KeyModifiers::NONE)
 }
@@ -2361,6 +2396,7 @@ fn overlays_do_not_open_quick_open_on_colon_ctrl_p_or_shift_f() {
         InputMode::ComparePicker,
         InputMode::GraphFocusPicker,
         InputMode::CreateBranch,
+        InputMode::FocusPrompt,
         InputMode::StashMenu,
         InputMode::BlameMenu,
         InputMode::CommentExport,
@@ -2391,6 +2427,7 @@ fn text_overlays_type_colon_and_shift_f() {
         assert_eq!(at(InputMode::SearchPrompt), Action::SearchChar(c));
         assert_eq!(at(InputMode::HelpSearch), Action::SearchChar(c));
         assert_eq!(at(InputMode::CreateBranch), Action::CreateBranchChar(c));
+        assert_eq!(at(InputMode::FocusPrompt), Action::FocusPromptChar(c));
         assert_eq!(at(InputMode::BranchPicker), Action::BranchChar(c));
         assert_eq!(at(InputMode::ComparePicker), Action::ComparePickerChar(c));
         assert_eq!(at(InputMode::GraphFocusPicker), Action::GraphFocusChar(c));
@@ -2581,6 +2618,7 @@ fn ctrl_w_closes_the_tab_in_normal_keymaps_only() {
         InputMode::SearchPrompt,
         InputMode::HelpSearch,
         InputMode::CreateBranch,
+        InputMode::FocusPrompt,
     ] {
         assert_eq!(
             event_to_action(&Event::Key(ctrl_w), mode, true, true),

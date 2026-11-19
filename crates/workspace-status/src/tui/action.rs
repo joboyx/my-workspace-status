@@ -192,6 +192,47 @@ pub enum Action {
     CreateBranchBackspace,
     CreateBranchSubmit,
     CreateBranchCancel,
+    /**
+     * Focus the tree on the feature of the focused row's branch (`*`): the
+     * ticket-like token of the branch name. When the applied focus query is
+     * already that token, clear it instead.
+     */
+    FocusThisFeature,
+    /**
+     * Focus the tree on the family primary repo path of the focused row
+     * (palette only).
+     */
+    FocusThisRepo,
+    /**
+     * Clear the tree focus query (palette only; a click on the focus chip
+     * does the same).
+     */
+    FocusClear,
+    /**
+     * Open the focus prompt, prefilled with the applied focus query
+     * (palette only).
+     */
+    FocusPromptOpen,
+    /**
+     * Type one character into the focus prompt; the tree previews the
+     * draft live.
+     */
+    FocusPromptChar(char),
+    /**
+     * Delete the last focus prompt character; the tree previews the draft
+     * live.
+     */
+    FocusPromptBackspace,
+    /**
+     * Apply the focus prompt draft (Enter). An empty draft clears the
+     * focus.
+     */
+    FocusPromptSubmit,
+    /**
+     * Close the focus prompt and restore the focus that was applied before
+     * it opened (Esc).
+     */
+    FocusPromptCancel,
     /// Open the comment overlay on the focused row or diff line (`;`).
     CommentStart,
     /// Start visual-line highlight on a focused file diff (`V`).
@@ -470,7 +511,7 @@ impl Action {
     /// The text fields are the search prompt and the help search
     /// ([`Self::SearchChar`]), the Quick Open query, the search-in-files
     /// query, the branch, compare, and graph-focus picker filters, the
-    /// new-branch name, and the comment body ([`Self::CommentInput`] of a
+    /// new-branch name, the focus prompt, and the comment body ([`Self::CommentInput`] of a
     /// character with no Ctrl or Alt; those chords edit or move in the
     /// textarea). Menu hotkeys ([`Self::StashMenuChar`],
     /// [`Self::BlameMenuChar`]), moves, and edits are not typing.
@@ -483,7 +524,8 @@ impl Action {
             | Self::BranchChar(_)
             | Self::ComparePickerChar(_)
             | Self::GraphFocusChar(_)
-            | Self::CreateBranchChar(_) => true,
+            | Self::CreateBranchChar(_)
+            | Self::FocusPromptChar(_) => true,
             Self::CommentInput(key) => {
                 matches!(key.code, KeyCode::Char(_))
                     && !key
@@ -942,6 +984,9 @@ mod tests {
             (Action::ComparePickerChar('l'), true),
             (Action::GraphFocusChar('l'), true),
             (Action::CreateBranchChar('l'), true),
+            (Action::FocusPromptChar(','), true),
+            (Action::FocusPromptBackspace, false),
+            (Action::FocusThisFeature, false),
             (comment(KeyCode::Char('l'), KeyModifiers::NONE), true),
             (comment(KeyCode::Char('L'), KeyModifiers::SHIFT), true),
             (comment(KeyCode::Char('a'), KeyModifiers::CONTROL), false),

@@ -9,6 +9,7 @@ use super::branches::is_family_container;
 use super::tree::{
     changes_side_change, dir_path_from_id, path_under_dir, staged_side_change, NodeKind, VisibleRow,
 };
+use super::tree_focus::FocusSplit;
 
 /// One dirty file in the focused write scope.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,6 +264,57 @@ pub fn format_running_op(kind: RunningOp, done: usize, total: usize) -> String {
     }
 }
 
+/// [`format_running_op`] for an op whose targets may be the focused set.
+///
+/// With a `scope` (a workspace-row op under a focus query) the counter
+/// names the focused set: `Fetching 0/3 focused…`. With no scope, or
+/// `total == 0`, the text is [`format_running_op`]'s.
+pub fn format_running_op_scoped(
+    kind: RunningOp,
+    done: usize,
+    total: usize,
+    scope: Option<FocusScope>,
+) -> String {
+    if scope.is_none() || total == 0 {
+        return format_running_op(kind, done, total);
+    }
+    format!("{} {done}/{total} focused…", running_op_verb(kind))
+}
+
+/// The focus scope of a workspace-row fetch, pull, or default-branch
+/// switch that runs under a focus query ([`op_focus_scope`]).
+///
+/// The op ran only on the focused set; its status text names its targets
+/// `focused repos` and counts the families it left out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FocusScope {
+    /// Families outside the focus that the op skipped
+    /// ([`FocusCounts::outside`](super::tree_focus::FocusCounts::outside)).
+    pub outside: usize,
+}
+
+/// True when `op` on `focused` covers the whole workspace: the workspace
+/// row, or no row. Only such an op reads the focus split; an op on one
+/// repo or checkout row targets that row with or without a focus.
+pub fn op_covers_workspace(focused: Option<&VisibleRow>) -> bool {
+    focused.is_none_or(|row| row.kind == NodeKind::Workspace)
+}
+
+/// The focus scope of a workspace-row op on `focused` under `focus` (the
+/// visible snapshot split by the applied focus query). `None` with no
+/// focus, or on any row but the workspace row.
+pub fn op_focus_scope(
+    focused: Option<&VisibleRow>,
+    focus: Option<&FocusSplit>,
+) -> Option<FocusScope> {
+    if !op_covers_workspace(focused) {
+        return None;
+    }
+    focus.map(|split| FocusScope {
+        outside: split.counts.outside,
+    })
+}
+
 /// Mixed breadcrumb trailing slot when more than one remote kind is live.
 ///
 /// Overlapping inflight kinds join counts without totals
@@ -364,7 +416,13 @@ impl OpTally {
 /// Skips count apart with the first reason (`1 skipped: dirty`). A pull
 /// whose auto-stash conflicted leads instead: `app: pulled, but restoring
 /// local changes conflicted — …`, with `(+N more failed)` for the rest.
-pub fn format_completed_op(kind: RunningOp, tally: &OpTally) -> String {
+///
+/// With a `scope` (a workspace-row op under a focus query) the count names
+/// the focused set and the count of families outside the focus follows the
+/// notes: `Fetched 3 focused repos (1 failed: …) · 28 skipped`. The short
+/// suffix keeps the line inside one ack toast row. It shows only when at
+/// least one family is outside.
+pub fn format_completed_op(kind: RunningOp, tally: &OpTally, scope: Option<FocusScope>) -> String {
     let failed: Vec<(&str, Option<&str>)> = tally
         .results
         .iter()
@@ -397,7 +455,12 @@ pub fn format_completed_op(kind: RunningOp, tally: &OpTally) -> String {
         RunningOp::DefaultBranch => "Switched",
     };
     let total = tally.done();
-    let noun = if total == 1 { "repo" } else { "repos" };
+    let noun = match (scope.is_some(), total == 1) {
+        (false, true) => "repo",
+        (false, false) => "repos",
+        (true, true) => "focused repo",
+        (true, false) => "focused repos",
+    };
     let mut notes = Vec::new();
     if let Some((repo, reason)) = failed.first() {
         let mut note = format!("{} failed: {repo} — {}", failed.len(), reason.unwrap_or(""));
@@ -409,11 +472,15 @@ pub fn format_completed_op(kind: RunningOp, tally: &OpTally) -> String {
     if let Some(reason) = skipped.first() {
         notes.push(format!("{} skipped: {reason}", skipped.len()));
     }
-    if notes.is_empty() {
+    let mut text = if notes.is_empty() {
         format!("{verb} {total} {noun}")
     } else {
         format!("{verb} {total} {noun} ({})", notes.join("; "))
+    };
+    if let Some(FocusScope { outside }) = scope.filter(|scope| scope.outside > 0) {
+        text.push_str(&format!(" · {outside} skipped"));
     }
+    text
 }
 
 /// True when `p` / `d` / `f` must not run on this row kind ([`op_kind_noop_reason`] says why).
@@ -448,11 +515,20 @@ pub fn op_kind_noop_reason(op: Op) -> &'static str {
 /// focused row is that worktree (or a file inside it). Pull and
 /// default-branch skip file, dir, section, and group rows; fetch
 /// still includes file, dir, and section, and skips group.
+///
+/// `focus` is the visible snapshot split by the applied focus query
+/// (`None` with no focus). It narrows only a workspace-wide op (the
+/// workspace row, or no row; see [`op_covers_workspace`]): fetch targets
+/// the primary checkout of each focused family (a fetch is per git dir,
+/// so a family whose only kept checkout is linked still fetches its
+/// primary); pull and default-branch target the primary checkouts the
+/// focus keeps. Outside families are skipped. A row op ignores it.
 pub fn op_targets(
     snapshot: &WorkspaceSnapshot,
     focused: Option<&VisibleRow>,
     show_hidden: bool,
     op: Op,
+    focus: Option<&FocusSplit>,
 ) -> Vec<String> {
     let visible: Vec<&WorkspaceRepoSnapshot> = snapshot
         .repos
@@ -461,7 +537,7 @@ pub fn op_targets(
         .collect();
 
     let Some(row) = focused else {
-        return primaries_only(&visible);
+        return workspace_targets(&visible, op, focus);
     };
 
     if op_is_kind_noop(row.kind, op) {
@@ -469,7 +545,7 @@ pub fn op_targets(
     }
 
     match row.kind {
-        NodeKind::Workspace => primaries_only(&visible),
+        NodeKind::Workspace => workspace_targets(&visible, op, focus),
         NodeKind::Group => Vec::new(),
         NodeKind::Repo => {
             // Family container or flat primary: that primary only.
@@ -485,6 +561,25 @@ pub fn op_targets(
             include_if_visible(repo, &visible)
         }
     }
+}
+
+/// Workspace-wide targets of `op`: the visible primaries, narrowed by
+/// `focus` as [`op_targets`] says.
+fn workspace_targets(
+    visible: &[&WorkspaceRepoSnapshot],
+    op: Op,
+    focus: Option<&FocusSplit>,
+) -> Vec<String> {
+    let mut targets = primaries_only(visible);
+    if let Some(split) = focus {
+        targets.retain(|path| {
+            split.focused.iter().any(|family| match op {
+                Op::Fetch => family.primary_path == *path,
+                Op::Pull | Op::DefaultBranch => family.keeps(path),
+            })
+        });
+    }
+    targets
 }
 
 fn primaries_only(visible: &[&WorkspaceRepoSnapshot]) -> Vec<String> {
@@ -649,14 +744,14 @@ mod tests {
     #[test]
     fn workspace_fetch_skips_hidden_and_worktrees() {
         let snapshot = built();
-        let targets = op_targets(&snapshot, Some(&workspace_row()), false, Op::Fetch);
+        let targets = op_targets(&snapshot, Some(&workspace_row()), false, Op::Fetch, None);
         assert_eq!(targets, vec!["app"]);
     }
 
     #[test]
     fn show_hidden_includes_notes_on_workspace_fetch() {
         let snapshot = built();
-        let targets = op_targets(&snapshot, Some(&workspace_row()), true, Op::Fetch);
+        let targets = op_targets(&snapshot, Some(&workspace_row()), true, Op::Fetch, None);
         assert_eq!(targets, vec!["app", "notes"]);
     }
 
@@ -665,11 +760,11 @@ mod tests {
         let snapshot = built();
         for op in [Op::Fetch, Op::Pull, Op::DefaultBranch] {
             assert!(
-                op_targets(&snapshot, Some(&group_row()), false, op).is_empty(),
+                op_targets(&snapshot, Some(&group_row()), false, op, None).is_empty(),
                 "{op:?}"
             );
             assert!(
-                op_targets(&snapshot, Some(&group_row()), true, op).is_empty(),
+                op_targets(&snapshot, Some(&group_row()), true, op, None).is_empty(),
                 "{op:?} shown hidden"
             );
         }
@@ -696,6 +791,7 @@ mod tests {
             Some(&checkout_row(".worktrees/app/feat")),
             false,
             Op::Pull,
+            None,
         );
         assert_eq!(targets, vec![".worktrees/app/feat"]);
     }
@@ -705,7 +801,7 @@ mod tests {
         let snapshot = built();
         let mut row = file_row("notes");
         row.hidden = true;
-        let targets = op_targets(&snapshot, Some(&row), false, Op::DefaultBranch);
+        let targets = op_targets(&snapshot, Some(&row), false, Op::DefaultBranch, None);
         assert!(targets.is_empty());
     }
 
@@ -714,7 +810,7 @@ mod tests {
         let snapshot = built();
         let mut row = file_row("notes");
         row.hidden = true;
-        let targets = op_targets(&snapshot, Some(&row), true, Op::Fetch);
+        let targets = op_targets(&snapshot, Some(&row), true, Op::Fetch, None);
         assert_eq!(targets, vec!["notes"]);
     }
 
@@ -912,16 +1008,16 @@ mod tests {
         let snapshot = built();
         let file = file_row("app");
         let dir = dir_row("app", "src");
-        assert!(op_targets(&snapshot, Some(&file), false, Op::Pull).is_empty());
-        assert!(op_targets(&snapshot, Some(&file), false, Op::DefaultBranch).is_empty());
-        assert!(op_targets(&snapshot, Some(&dir), false, Op::Pull).is_empty());
-        assert!(op_targets(&snapshot, Some(&dir), false, Op::DefaultBranch).is_empty());
+        assert!(op_targets(&snapshot, Some(&file), false, Op::Pull, None).is_empty());
+        assert!(op_targets(&snapshot, Some(&file), false, Op::DefaultBranch, None).is_empty());
+        assert!(op_targets(&snapshot, Some(&dir), false, Op::Pull, None).is_empty());
+        assert!(op_targets(&snapshot, Some(&dir), false, Op::DefaultBranch, None).is_empty());
         assert_eq!(
-            op_targets(&snapshot, Some(&file), false, Op::Fetch),
+            op_targets(&snapshot, Some(&file), false, Op::Fetch, None),
             vec!["app"]
         );
         assert_eq!(
-            op_targets(&snapshot, Some(&dir), false, Op::Fetch),
+            op_targets(&snapshot, Some(&dir), false, Op::Fetch, None),
             vec!["app"]
         );
         assert!(op_is_kind_noop(NodeKind::File, Op::Pull));
@@ -1342,7 +1438,7 @@ mod tests {
         let failed = |why: &str| RepoOpResult::Failed(why.into());
         let three_ok = tally(&[("a", ok()), ("b", ok()), ("c", ok())]);
         assert_eq!(
-            format_completed_op(RunningOp::Pull, &three_ok),
+            format_completed_op(RunningOp::Pull, &three_ok, None),
             "Pulled 3 repos"
         );
         assert_eq!(
@@ -1353,11 +1449,12 @@ mod tests {
                     ("b", ok()),
                     ("c", ok())
                 ]),
+                None,
             ),
             "Pushed 3 repos (1 failed: app — detached HEAD cannot push)"
         );
         assert_eq!(
-            format_completed_op(RunningOp::Push, &tally(&[("b", ok())])),
+            format_completed_op(RunningOp::Push, &tally(&[("b", ok())]), None),
             "Pushed 1 repo"
         );
         assert_eq!(
@@ -1368,6 +1465,7 @@ mod tests {
                     ("lib", failed("timeout")),
                     ("notes", failed("timeout")),
                 ]),
+                None,
             ),
             "Fetched 3 repos (3 failed: app — could not read from remote, +2 more)"
         );
@@ -1383,7 +1481,7 @@ mod tests {
             ("c", skipped()),
         ]);
         assert_eq!(
-            format_completed_op(RunningOp::DefaultBranch, &mixed),
+            format_completed_op(RunningOp::DefaultBranch, &mixed, None),
             "Switched 3 repos (1 skipped: dirty)"
         );
         assert!(mixed.has_skip() && !mixed.has_failure());
@@ -1392,7 +1490,7 @@ mod tests {
             ("b", skipped()),
         ]);
         assert_eq!(
-            format_completed_op(RunningOp::DefaultBranch, &both),
+            format_completed_op(RunningOp::DefaultBranch, &both, None),
             "Switched 2 repos (1 failed: a — no default branch found; 1 skipped: dirty)"
         );
     }
@@ -1404,7 +1502,7 @@ mod tests {
             ("app", RepoOpResult::StashConflict),
         ]);
         assert_eq!(
-            format_completed_op(RunningOp::Pull, &one),
+            format_completed_op(RunningOp::Pull, &one, None),
             format!("app: {STASH_CONFLICT_COPY}")
         );
         assert!(one.has_failure());
@@ -1413,8 +1511,152 @@ mod tests {
             ("app", RepoOpResult::StashConflict),
         ]);
         assert_eq!(
-            format_completed_op(RunningOp::Pull, &more),
+            format_completed_op(RunningOp::Pull, &more, None),
             format!("app: {STASH_CONFLICT_COPY} (+1 more failed)")
         );
+    }
+
+    #[test]
+    fn a_focused_workspace_op_names_the_focused_set_and_the_skipped_count() {
+        let scope = |outside| Some(FocusScope { outside });
+        let two_ok = tally(&[("app", RepoOpResult::Ok), ("lib", RepoOpResult::Ok)]);
+        assert_eq!(
+            format_completed_op(RunningOp::Fetch, &two_ok, scope(28)),
+            "Fetched 2 focused repos · 28 skipped"
+        );
+        assert_eq!(
+            format_completed_op(
+                RunningOp::Pull,
+                &tally(&[("app", RepoOpResult::Ok)]),
+                scope(1)
+            ),
+            "Pulled 1 focused repo · 1 skipped"
+        );
+        assert_eq!(
+            format_completed_op(RunningOp::Fetch, &two_ok, scope(0)),
+            "Fetched 2 focused repos",
+            "no family outside: no skipped part"
+        );
+        let mixed = tally(&[
+            (
+                "app",
+                RepoOpResult::Failed("no default branch found".into()),
+            ),
+            ("lib", RepoOpResult::Skipped("dirty".into())),
+            ("api", RepoOpResult::Ok),
+        ]);
+        assert_eq!(
+            format_completed_op(RunningOp::DefaultBranch, &mixed, scope(3)),
+            "Switched 3 focused repos (1 failed: app — no default branch found; \
+             1 skipped: dirty) · 3 skipped",
+            "the notes stay right after the count"
+        );
+        assert_eq!(
+            format_completed_op(RunningOp::DefaultBranch, &mixed, None),
+            "Switched 3 repos (1 failed: app — no default branch found; 1 skipped: dirty)",
+            "no focus: today's text"
+        );
+    }
+
+    #[test]
+    fn a_focused_workspace_op_progress_names_the_focused_set() {
+        let scope = Some(FocusScope { outside: 28 });
+        assert_eq!(
+            format_running_op_scoped(RunningOp::Fetch, 0, 3, scope),
+            "Fetching 0/3 focused…"
+        );
+        assert_eq!(
+            format_running_op_scoped(RunningOp::DefaultBranch, 1, 2, scope),
+            "Switching 1/2 focused…"
+        );
+        assert_eq!(
+            format_running_op_scoped(RunningOp::Pull, 0, 0, scope),
+            "Pulling…"
+        );
+        assert_eq!(
+            format_running_op_scoped(RunningOp::Pull, 2, 18, None),
+            "Pulling 2/18…",
+            "no focus: today's text"
+        );
+    }
+
+    /// The focus demo workspace: `app` (on `main`) with linked
+    /// `app/.worktrees/abc-123` and `app/.worktrees/login`, `services/api`
+    /// on `feature/abc-123-api`, `lib`, and `notes`; every checkout is
+    /// behind so pull has targets.
+    fn focus_workspace() -> WorkspaceSnapshot {
+        let mut repos = crate::testutil::focus_workspace_repos();
+        for repo in &mut repos {
+            repo.sync_status = SyncStatus::Behind;
+        }
+        build_workspace_snapshot(&repos, &[], false, &[])
+    }
+
+    fn split(snapshot: &WorkspaceSnapshot, query: &str) -> FocusSplit {
+        use crate::tui::tree_focus::{split_by_focus, TreeFocus};
+        split_by_focus(&TreeFocus::parse(query), snapshot)
+    }
+
+    #[test]
+    fn a_feature_focus_fetches_the_primary_of_a_linked_only_match_and_pull_skips_it() {
+        let snapshot = focus_workspace();
+        let focus = split(&snapshot, "ABC-123");
+        let ws = workspace_row();
+        let targets = |op| op_targets(&snapshot, Some(&ws), false, op, Some(&focus));
+        // `app` is kept only through its linked `abc-123` checkout: fetch
+        // is per git dir, so the primary fetches; pull and default switch
+        // touch kept primaries only, so `app` (on `main`, not kept) stays.
+        assert_eq!(targets(Op::Fetch), ["app", "services/api"]);
+        assert_eq!(targets(Op::Pull), ["services/api"]);
+        assert_eq!(targets(Op::DefaultBranch), ["services/api"]);
+        assert_eq!(
+            op_targets(&snapshot, None, false, Op::Fetch, Some(&focus)),
+            ["app", "services/api"],
+            "no row: the workspace rule"
+        );
+        assert_eq!(
+            op_focus_scope(Some(&ws), Some(&focus)),
+            Some(FocusScope { outside: 2 }),
+            "lib and notes are outside"
+        );
+    }
+
+    #[test]
+    fn a_repo_focus_keeps_the_family_primary_for_every_op() {
+        let snapshot = focus_workspace();
+        let focus = split(&snapshot, "app, lib");
+        let ws = workspace_row();
+        for op in [Op::Fetch, Op::Pull, Op::DefaultBranch] {
+            assert_eq!(
+                op_targets(&snapshot, Some(&ws), false, op, Some(&focus)),
+                ["app", "lib"],
+                "{op:?}"
+            );
+        }
+        assert_eq!(
+            op_targets(&snapshot, Some(&ws), false, Op::Fetch, None),
+            ["app", "lib", "notes", "services/api"],
+            "no focus: every visible primary"
+        );
+    }
+
+    #[test]
+    fn a_row_op_ignores_the_focus() {
+        let snapshot = focus_workspace();
+        let focus = split(&snapshot, "ABC-123");
+        let lib = repo_row("lib");
+        assert_eq!(
+            op_targets(&snapshot, Some(&lib), false, Op::Pull, Some(&focus)),
+            ["lib"],
+            "an outside repo row still pulls itself"
+        );
+        let login = checkout_row("app/.worktrees/login");
+        assert_eq!(
+            op_targets(&snapshot, Some(&login), false, Op::Fetch, Some(&focus)),
+            ["app/.worktrees/login"]
+        );
+        assert_eq!(op_focus_scope(Some(&lib), Some(&focus)), None);
+        assert_eq!(op_focus_scope(Some(&group_row()), Some(&focus)), None);
+        assert_eq!(op_focus_scope(Some(&workspace_row()), None), None);
     }
 }

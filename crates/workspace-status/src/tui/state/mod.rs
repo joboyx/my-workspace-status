@@ -10,6 +10,8 @@ mod dispatch_write;
 mod doctor;
 mod explorer_tab;
 mod file_view;
+mod focus_actions;
+mod focus_query;
 mod go_to_line;
 mod line_blame;
 mod outage;
@@ -103,8 +105,9 @@ use super::icons::{comment_mark_cols, IconKind};
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
 use super::line_blame::{GraphReveal, LineBlameState};
 use super::ops::{
-    collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
-    push_targets, refresh_target, snapshot_pushable, Op, RevertScope, RunningOp, ScopedFile,
+    collect_write_files, format_running_op, format_running_op_scoped, op_is_kind_noop,
+    op_kind_noop_reason, push_targets, refresh_target, snapshot_pushable, Op, RevertScope,
+    RunningOp, ScopedFile,
 };
 use super::outage::{OutageSource, Outages};
 use super::popover::{IconTarget, PopoverState};
@@ -141,10 +144,11 @@ use super::tabs::{
 use super::theme::{BackgroundMode, ThemeId};
 use super::toast::ToastStack;
 use super::tree::{
-    build_tree, collect_foldable_subtree_ids, cursor_for_viewport_top, default_folds, flatten_with,
-    list_viewport_start, visible_for_tree, visible_window, workspace_label_from_cwd, NodeKind,
-    TreeNode, VisibleRow,
+    build_focused_tree, build_tree, collect_foldable_subtree_ids, cursor_for_viewport_top,
+    default_folds, flatten_with, list_viewport_start, visible_for_tree, visible_window,
+    workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
+use super::tree_focus::TreeFocus;
 use super::ui_state_store::{save_activity_sparkline, save_commit_msg_lines, save_theme};
 use super::undercurl::UndercurlHit;
 use super::viewed::{
@@ -159,6 +163,8 @@ use super::watch::{
     GraphFlashMeta,
 };
 use crate::git::{DiffOpts, PushPlan, StashTarget, FULL_DIFF_CONTEXT_LINES};
+pub(crate) use focus_actions::FocusPromptState;
+use focus_query::FocusPreview;
 
 /// Status for a key drained while a git write runs and the job has no name.
 pub(crate) const BUSY_WRITE_RUNNING: &str = "busy: a git write is running";
@@ -549,6 +555,9 @@ pub struct LayoutHit {
     /// need you`) when the tree painted it; a click there opens the PRs
     /// tab.
     pub pr_total_hit: Option<Rect>,
+    /// Cells of the focus chip on the workspace row (`◎ ABC-123 · 3/31
+    /// repos`) when the tree painted it; a click there clears the focus.
+    pub focus_chip_hit: Option<Rect>,
     /// Results rows the search-in-files dialog painted last; PgUp / PgDn
     /// move by it.
     pub search_files_rows: u16,
@@ -661,6 +670,7 @@ impl Default for LayoutHit {
             prs_detail: Rect::default(),
             prs_detail_rows: Rect::default(),
             pr_total_hit: None,
+            focus_chip_hit: None,
             search_files_rows: 0,
             animating: false,
             gliding: false,
@@ -1071,9 +1081,20 @@ pub struct AppState {
     pub comment_path: PathBuf,
     /// UI-state store path (see [`crate::tui::ui_state_store`]). The
     /// palette `Theme: …` rows and Toggle activity sparkline write it;
-    /// [`crate::settings::Settings::resolve`] loads it at launch, not
-    /// `AppState`.
+    /// [`crate::settings::Settings::resolve`] loads it at launch, except
+    /// the per-workspace focus query, which [`Self::launch`] loads.
     pub ui_store_path: PathBuf,
+    /// The applied focus query of the left-pane tree (see
+    /// [`crate::tui::tree_focus`]); `None` shows every repo. Named "focus
+    /// query" because "tree focus" already means keyboard focus on the tree
+    /// pane ([`FocusPane`]). Set through [`Self::set_focus_query`].
+    focus_query: Option<TreeFocus>,
+    /// The focus prompt's live preview while it runs
+    /// ([`Self::preview_focus_query`]).
+    focus_preview: Option<FocusPreview>,
+    /// The open focus prompt (palette `Focus: type a query…`); its draft
+    /// previews the tree live.
+    pub(crate) focus_prompt: Option<FocusPromptState>,
     /// Shared background-fetch store ([`crate::tui::fetch_claim`]). The
     /// scheduled fetch claims it and each watch tick reads its record; set
     /// by [`Self::open_background_fetch_store`].
@@ -1357,6 +1378,7 @@ impl AppState {
             state.ignore_whitespace = on;
         }
         state.open_background_fetch_store(settings.fetch_store.clone());
+        state.restore_focus_query();
         // A checkout whose `git status` failed in the launch snapshot
         // starts the live-refresh outage at once.
         state.sync_live_refresh_outage(Instant::now());
@@ -1467,6 +1489,9 @@ impl AppState {
             comment_checkout_owners: HashMap::new(),
             comment_path,
             ui_store_path,
+            focus_query: None,
+            focus_preview: None,
+            focus_prompt: None,
             fetch_store_path: PathBuf::new(),
             fetch_applied_generation: 0,
             comment: None,
@@ -1643,6 +1668,8 @@ impl AppState {
             InputMode::CommentExport
         } else if self.create_branch.is_some() {
             InputMode::CreateBranch
+        } else if self.focus_prompt.is_some() {
+            InputMode::FocusPrompt
         } else if self.branch_picker.is_some() {
             InputMode::BranchPicker
         } else if self.compare_picker.is_some() {
@@ -2691,12 +2718,15 @@ impl AppState {
         self.set_commit_file_cursor(previous.min(rows.len() - 1));
     }
 
+    /// The tree of the visible snapshot (positional filter and hidden repos
+    /// first), narrowed by the shown focus query.
     fn visible_tree(&self) -> TreeNode {
         let visible = visible_snapshot(&self.snapshot, self.show_hidden);
-        build_tree(
+        build_focused_tree(
             &visible,
             self.tree_mode,
             &workspace_label_from_cwd(&self.cwd),
+            self.shown_focus_query(),
         )
     }
 
@@ -2706,7 +2736,9 @@ impl AppState {
         #[cfg(test)]
         REBUILD_ROWS_CALLS.with(|calls| calls.set(calls.get() + 1));
         let focus_id = self.focused_row().map(|r| r.id.clone());
+        let had_outside = self.has_outside_focus_group();
         self.tree = self.visible_tree();
+        self.sync_outside_focus_fold(had_outside);
         self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
         self.restore_focus_after_tree_rebuild(focus_id);
     }
@@ -3109,15 +3141,24 @@ impl AppState {
             self.status = StatusMessage::warn(op_kind_noop_reason(op));
             return Effect::None;
         }
-        let targets = op_targets(&self.snapshot, self.focused_row(), self.show_hidden, op);
+        let targets = self.focused_op_targets(op);
+        let scope = self.op_focus_scope();
         if targets.is_empty() {
-            self.status = StatusMessage::warn("no visible repos for that op");
+            self.status = StatusMessage::warn(if scope.is_some() {
+                "no focused repos for that op"
+            } else {
+                "no visible repos for that op"
+            });
             return Effect::None;
         }
         match op {
             Op::Fetch => {
-                self.status =
-                    StatusMessage::progress(format_running_op(RunningOp::Fetch, 0, targets.len()));
+                self.status = StatusMessage::progress(format_running_op_scoped(
+                    RunningOp::Fetch,
+                    0,
+                    targets.len(),
+                    scope,
+                ));
                 Effect::Fetch { repos: targets }
             }
             Op::Pull => {
@@ -3138,10 +3179,11 @@ impl AppState {
                 if behind.is_empty() {
                     self.pull_nothing_behind(&diverged)
                 } else {
-                    self.status = StatusMessage::progress(format_running_op(
+                    self.status = StatusMessage::progress(format_running_op_scoped(
                         RunningOp::Pull,
                         0,
                         behind.len(),
+                        scope,
                     ));
                     Effect::Pull { repos: behind }
                 }
@@ -3168,10 +3210,11 @@ impl AppState {
                     self.confirm = Some(PendingConfirm::SwitchToDefault { repos });
                     Effect::None
                 } else {
-                    self.status = StatusMessage::progress(format_running_op(
+                    self.status = StatusMessage::progress(format_running_op_scoped(
                         RunningOp::DefaultBranch,
                         0,
                         repos.len(),
+                        scope,
                     ));
                     Effect::DefaultBranch { repos }
                 }
@@ -3557,7 +3600,7 @@ impl AppState {
     }
 
     /// Plain left press: tabs, the PRs tab panes, the workspace PR total,
-    /// dividers, scrollbars, then the row under it.
+    /// the focus chip (clears the focus), dividers, scrollbars, then the row under it.
     fn click_at(&mut self, col: u16, row: u16) -> Effect {
         self.text_selection = None;
         self.pad_press = None;
@@ -3579,6 +3622,14 @@ impl AppState {
         {
             self.last_click = None;
             return self.open_prs_tab();
+        }
+        if self
+            .layout
+            .focus_chip_hit
+            .is_some_and(|hit| hit.contains(ratatui::layout::Position::new(col, row)))
+        {
+            self.last_click = None;
+            return self.clear_focus_query();
         }
         if let Some(effect) = self.press_split_hit(col, row) {
             return effect;
@@ -5638,10 +5689,11 @@ impl AppState {
                 Effect::MergeIntoHead { repo, rev, label }
             }
             Some(PendingConfirm::SwitchToDefault { repos }) => {
-                self.status = StatusMessage::progress(format_running_op(
+                self.status = StatusMessage::progress(format_running_op_scoped(
                     RunningOp::DefaultBranch,
                     0,
                     repos.len(),
+                    self.op_focus_scope(),
                 ));
                 Effect::DefaultBranch { repos }
             }

@@ -152,6 +152,13 @@ pub struct WorkspaceRepoSnapshot {
     pub changes: Vec<FileChange>,
 }
 
+impl WorkspaceRepoSnapshot {
+    /// True when the checkout has a staged, unstaged, or untracked change.
+    pub fn is_dirty(&self) -> bool {
+        self.has_staged || self.has_unstaged || self.has_untracked
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSnapshot {

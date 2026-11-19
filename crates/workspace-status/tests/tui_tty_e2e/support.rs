@@ -1852,3 +1852,68 @@ pub fn links_since(tui: &PtySession, from: usize) -> Vec<(String, String)> {
     let raw = tui.raw_output();
     osc8_links(&String::from_utf8_lossy(&raw[from.min(raw.len())..]))
 }
+
+/// Write `body` as the UI-state store at `path` (parent dirs too), for a
+/// test that launches on a pre-written `WS_STATUS_UI_STORE`.
+pub fn write_ui_store(path: &Path, body: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, body).unwrap();
+}
+
+/// Workspace-row chip of the `ABC-123` focus on
+/// [`crate::seed::tree_focus_workspace`] (ASCII glyph `(o)`).
+pub const FOCUS_CHIP_ABC: &str = "(o) ABC-123 · 2/4 repos";
+
+/// Outside-focus row of the `ABC-123` focus on
+/// [`crate::seed::tree_focus_workspace`]: `lib` and the dirty `notes`.
+pub const OUTSIDE_ROW_ABC: &str = "2 outside focus · 1 dirty";
+
+/// The left-tree workspace root row (`# workspace …`) contains `text`.
+pub fn workspace_row_has(screen: &str, text: &str) -> bool {
+    tree_line_containing(screen, "# workspace").is_some_and(|line| line.contains(text))
+}
+
+/// The tree is narrowed to `ABC-123`: the chip on the workspace row, the
+/// folded outside row, the focused repos shown and the outside repos not.
+pub fn tree_focused_on_abc(screen: &str) -> bool {
+    workspace_row_has(screen, FOCUS_CHIP_ABC)
+        && tree_line_containing(screen, OUTSIDE_ROW_ABC).is_some_and(|line| line.contains('>'))
+        && tree_has(screen, "app")
+        && tree_has(screen, "services/api")
+        && !tree_has(screen, "notes")
+        && !tree_has(screen, "lib")
+}
+
+/// Launch paint of [`crate::seed::tree_focus_workspace`] with no focus:
+/// the dirty `notes/README.md` focused, no chip, no outside row.
+pub fn tree_focus_first_paint(screen: &str) -> bool {
+    tree_cursor_on(screen, "README.md")
+        && tree_has(screen, "app")
+        && tree_has(screen, "services/api")
+        && tree_has(screen, "notes")
+        && !workspace_row_has(screen, "(o)")
+        && !tree_has(screen, "outside focus")
+}
+
+/// From the launch paint of [`crate::seed::tree_focus_workspace`]: `/app`
+/// puts the cursor on `app` (on `feature/ABC-123-invoice-export`), then `*`
+/// focuses the tree on its ticket token `ABC-123`.
+pub fn focus_feature_from_app(tui: &mut PtySession) {
+    tui.wait_pred(
+        tree_focus_first_paint,
+        "first paint: every repo shows, no focus chip, no outside row",
+        GIT_WAIT,
+    );
+    tui.search("app");
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "app") && !tree_cursor_on(screen, "README.md"),
+        "/app moves the tree cursor to the app row",
+        WAIT,
+    );
+    tui.key('*');
+    tui.wait_pred(
+        after_ack("focus: ABC-123", tree_focused_on_abc),
+        "`*` on app focuses ABC-123: chip on the workspace row, folded outside row",
+        WAIT,
+    );
+}

@@ -95,12 +95,14 @@ impl AppState {
 
     /// Ctrl-f: close the open dialog, else open it for the focused scope.
     ///
-    /// A parked dialog whose results belong to that same scope comes back
-    /// as it was: query, options, hits, highlighted row, and scroll. Only
-    /// work it had not finished runs again (an index still loading, or a
-    /// search still due or running). Any other open starts fresh in the
-    /// focused scope with the parked query and options, loads the index,
-    /// and searches once it lands, so no hit from another scope shows.
+    /// A parked dialog whose results belong to that same scope, with the
+    /// same index roots (a focus set or cleared since changes the
+    /// workspace roots), comes back as it was: query, options, hits,
+    /// highlighted row, and scroll. Only work it had not finished runs
+    /// again (an index still loading, or a search still due or running).
+    /// Any other open starts fresh in the focused scope with the parked
+    /// query and options, loads the index, and searches once it lands, so
+    /// no hit from another scope or repo set shows.
     fn toggle_search_files(&mut self) -> Effect {
         if self.search_files.is_some() {
             self.close_search_files();
@@ -145,7 +147,11 @@ impl AppState {
         }
         let focused = self.quick_open_scope();
         match self.search_files_parked.take() {
-            Some(mut parked) if parked.focused == focused && parked.scope() == focused => {
+            Some(mut parked)
+                if parked.focused == focused
+                    && parked.scope() == focused
+                    && self.search_index_roots_current(&parked) =>
+            {
                 parked.zone = SearchZone::Query;
                 let mut unfinished = parked.pending();
                 if let Some(query) = query.filter(|query| *query != parked.query) {
@@ -173,6 +179,18 @@ impl AppState {
                 self.search_files = Some(SearchFilesState::new(focused, query, options));
                 self.request_search_index()
             }
+        }
+    }
+
+    /// True when `dialog`'s ready index lists the roots its scope gives
+    /// now ([`Self::quick_open_roots`]). A focus set or cleared since the
+    /// index loaded changes the workspace roots under the same scope. An
+    /// index that is not ready says true: a restore loads it again for
+    /// the roots of now.
+    fn search_index_roots_current(&self, dialog: &SearchFilesState) -> bool {
+        match &dialog.index {
+            FileIndexState::Ready(index) => index.roots == self.quick_open_roots(&dialog.scope()),
+            _ => true,
         }
     }
 

@@ -448,6 +448,62 @@ fn different_scope_ctrl_f_keeps_the_query_and_searches_again() {
     }
 }
 
+/// Open on the workspace row, land an index of the requested roots, search
+/// `query`, land one hit, and park the dialog.
+fn park_workspace_search(app: &mut AppState, query: &str) {
+    focus_row(app, NodeKind::Workspace, None);
+    let (gen, roots) = open(app);
+    let index = FileIndex {
+        roots,
+        ..index_of(&["README.md"])
+    };
+    app.apply_search_index(gen, index);
+    type_text(app, query);
+    let gen = search_gen(Some(fire(app)));
+    app.apply_search_chunk(gen, chunk(vec![hit(0, 1)], None));
+    park(app);
+}
+
+fn workspace_root(name: &str) -> IndexRoot {
+    IndexRoot {
+        checkout: name.into(),
+        prefix: format!("{name}/"),
+    }
+}
+
+#[test]
+fn setting_a_focus_reopens_a_parked_workspace_search_on_the_focused_repos() {
+    let mut app = family_state();
+    park_workspace_search(&mut app, "line");
+
+    app.set_focus_query("lib");
+    focus_row(&mut app, NodeKind::Workspace, None);
+    let (_, roots) = open(&mut app);
+    assert_eq!(roots, vec![workspace_root("lib")]);
+    assert_eq!(dialog(&app).query, "line", "the query carries");
+    assert!(
+        dialog(&app).hits.is_empty(),
+        "no hit from outside the focus"
+    );
+}
+
+#[test]
+fn clearing_the_focus_reopens_a_parked_workspace_search_on_all_repos() {
+    let mut app = family_state();
+    app.set_focus_query("lib");
+    park_workspace_search(&mut app, "line");
+
+    app.clear_focus_query();
+    focus_row(&mut app, NodeKind::Workspace, None);
+    let (_, roots) = open(&mut app);
+    assert_eq!(roots, vec![workspace_root("app"), workspace_root("lib")]);
+    assert_eq!(dialog(&app).query, "line", "the query carries");
+    assert!(
+        dialog(&app).hits.is_empty(),
+        "no hit from the old focus only"
+    );
+}
+
 #[test]
 fn stale_index_and_chunk_generations_are_dropped() {
     let mut app = family_state();

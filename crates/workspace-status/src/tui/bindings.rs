@@ -183,6 +183,8 @@ pub const QUIT: KeyBinding = bind("q", Action::Quit);
 pub const KEYMAP_HELP: KeyBinding = bind("?", Action::ToggleHelp);
 /// `.`: show or hide hidden repos.
 pub const SHOW_HIDDEN: KeyBinding = bind(".", Action::ToggleShowHidden);
+/// `*`: focus the tree on the focused row's feature; again clears it.
+pub const FOCUS_THIS_FEATURE: KeyBinding = bind("*", Action::FocusThisFeature);
 /// `f`: fetch remotes.
 pub const FETCH: KeyBinding = bind("f", Action::Fetch);
 /// `p`: pull behind.
@@ -293,6 +295,7 @@ pub const NORMAL_KEYS: &[KeyBinding] = &[
     QUIT,
     KEYMAP_HELP,
     SHOW_HIDDEN,
+    FOCUS_THIS_FEATURE,
     FETCH,
     PULL,
     DEFAULT_BRANCH,
@@ -969,6 +972,34 @@ mod tests {
                 Scope::NoHighlight,
                 Some((Normal, key(Char('.')))),
                 Action::ToggleShowHidden,
+            ),
+            (
+                "Focus: this feature",
+                "*",
+                Scope::NoHighlight,
+                Some((Normal, key(Char('*')))),
+                Action::FocusThisFeature,
+            ),
+            (
+                "Focus: this repo",
+                "",
+                Scope::NoHighlight,
+                None,
+                Action::FocusThisRepo,
+            ),
+            (
+                "Focus: type a query…",
+                "",
+                Scope::NoHighlight,
+                None,
+                Action::FocusPromptOpen,
+            ),
+            (
+                "Focus: clear",
+                "",
+                Scope::NoHighlight,
+                None,
+                Action::FocusClear,
             ),
             (
                 "Inline / split",

@@ -8398,7 +8398,10 @@ fn help_overlay_is_short() {
     terminal.draw(|frame| draw(frame, &mut state)).unwrap();
     let text = buffer_text(&terminal);
     assert!(text.contains("quit"), "{text}");
-    assert!(text.contains("show / hide hidden"), "{text}");
+    assert!(
+        text.contains("show / hide hidden · focus this feature"),
+        "{text}"
+    );
     assert!(text.contains("stash menu"), "{text}");
     assert!(text.contains("push ahead"), "{text}");
     assert!(text.contains("remove linked worktree"), "{text}");

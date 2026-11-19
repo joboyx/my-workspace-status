@@ -104,10 +104,11 @@ use super::tabs::{
 use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId};
 use super::toast::{Toast, ToastMark, ToastTick};
 use super::tree::{
-    fit_upstream_rewrite_text, painted_row_segments, pr_badge_kind, pr_badge_role, visible_window,
-    workspace_trailing_fit, NodeKind, NodeSegments, PrBadge, PrMark, PrTotals, SegRole, TextSeg,
-    VisibleRow, PR_REF_MIN_TREE_COLS,
+    fit_upstream_rewrite_text, highlight_focus_matches, painted_row_segments, pr_badge_kind,
+    pr_badge_role, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, PrBadge, PrMark,
+    PrTotals, SegRole, TextSeg, VisibleRow, PR_REF_MIN_TREE_COLS,
 };
+use super::tree_focus::TreeFocus;
 use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, UndercurlHit};
 use super::watch::FlashKind;
 use crate::file_index::{FileIndex, FileRead};
@@ -115,6 +116,7 @@ use crate::file_search::{SearchHit, SearchOptions};
 use crate::git::LineBlame;
 use crate::helpers::{is_detached_head_branch, visible_width};
 
+mod focus_prompt;
 mod prs_tab;
 
 /// Empty tree / empty commit-file list.
@@ -303,6 +305,7 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.prs_detail = Rect::default();
     state.layout.prs_detail_rows = Rect::default();
     state.layout.pr_total_hit = None;
+    state.layout.focus_chip_hit = None;
     state.layout.file_view_rows = Rect::default();
     state.layout.pane_height = chunks[1].height;
     let edge_area = if state.is_explorer_tab() {
@@ -341,7 +344,10 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
         let rect = dialog_rect(chunks[1], width, dialog_height(state, kind, width));
         // Everything outside the box recedes. The copy frame below keeps
         // the dim: only colours change, so drag-copy reads the same text.
-        dim_backdrop(frame.buffer_mut(), area, rect, palette, state.no_color);
+        // The focus prompt keeps the tree bright: it previews the draft.
+        if kind != DialogKind::FocusPrompt {
+            dim_backdrop(frame.buffer_mut(), area, rect, palette, state.no_color);
+        }
         match kind {
             DialogKind::Help => {
                 let max = draw_help(frame, rect, state);
@@ -353,6 +359,7 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
             DialogKind::StashMenu => draw_stash_menu(frame, rect, state),
             DialogKind::BlameMenu => draw_blame_menu(frame, rect, state),
             DialogKind::CreateBranch => draw_create_branch(frame, rect, state),
+            DialogKind::FocusPrompt => focus_prompt::draw_focus_prompt(frame, rect, state),
             DialogKind::Comment => draw_comment(frame, rect, state),
             DialogKind::CommentExport => draw_comment_export(frame, rect, state),
             DialogKind::BranchPicker => draw_branch_picker(frame, rect, state),
@@ -1894,6 +1901,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         })
         .collect();
     let pr_totals = state.pr_totals();
+    let focus_query = state.shown_focus_query().cloned();
     for (y, row) in (area.y..).zip(painted.iter().skip(start).take(height)) {
         let (viewed, commented, resolved, pr) = state.tree_row_marks(row, width, now);
         let spinner = tree_row_runs_remote(row, &state.remote_activity.running, &running_families)
@@ -1917,8 +1925,9 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             spinner,
             sparkline: bars,
             no_color: state.no_color,
+            focus: focus_query.as_ref(),
         };
-        let (line, icons, total_cols) = paint_tree_row(
+        let (line, icons, workspace_cols) = paint_tree_row(
             row,
             width,
             Some(row.id.as_str()) == focus_id,
@@ -1934,10 +1943,21 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         lines.push(line);
         // The PR total ends the workspace row flush right, left of the
         // vertical bar's column; a click on it opens the PRs tab.
-        if let Ok(total_w) = u16::try_from(total_cols) {
+        if let Ok(total_w) = u16::try_from(workspace_cols.pr_total) {
             if total_w > 0 && total_w <= rows_area.width {
                 state.layout.pr_total_hit =
                     Some(Rect::new(rows_area.right() - total_w, y, total_w, 1));
+            }
+        }
+        // The focus chip starts the workspace summary, which also ends
+        // flush right; a click on it clears the focus.
+        if let Some((from_right, chip_w)) = workspace_cols.chip {
+            if let (Ok(from_right), Ok(chip_w)) = (u16::try_from(from_right), u16::try_from(chip_w))
+            {
+                if chip_w > 0 && from_right <= rows_area.width {
+                    state.layout.focus_chip_hit =
+                        Some(Rect::new(rows_area.right() - from_right, y, chip_w, 1));
+                }
             }
         }
         for (kind, x, w) in icons {
@@ -1965,7 +1985,7 @@ type IconSpan = (IconKind, usize, usize);
 /// Per-row marks and live decorations a tree row paints beside its own
 /// segments.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct TreeRowDecor {
+struct TreeRowDecor<'a> {
     /// File row is marked reviewed.
     viewed: bool,
     /// Row has a comment.
@@ -1987,6 +2007,20 @@ struct TreeRowDecor {
     /// `NO_COLOR`: the spinner and the sparkline take the terminal
     /// foreground.
     no_color: bool,
+    /// The focus query the tree shows (the prompt draft while it
+    /// previews): its matches highlight in repo and branch names.
+    focus: Option<&'a TreeFocus>,
+}
+
+/// Columns of the workspace row's click areas, both counted on the
+/// trailing run that ends flush right.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WorkspaceRowCols {
+    /// Columns of the PR total that ends the row (`0` when it shows none).
+    pr_total: usize,
+    /// The focus chip: columns from its first cell to the right edge, and
+    /// its width. `None` when the row paints no chip.
+    chip: Option<(usize, usize)>,
 }
 
 /// A repo or checkout row with remote git in flight.
@@ -2014,8 +2048,8 @@ fn tree_row_runs_remote(
 /// Paint one tree row. Also returns an [`IconSpan`] for each segment the
 /// row paints with a catalog icon tag ([`TextSeg::icon`]) that is still on
 /// screen after `col_offset`, the label budget, and the row `width`; and
-/// the columns of the workspace PR total, which ends the workspace row
-/// flush right (`0` when the row paints none).
+/// the columns of the workspace PR total and focus chip, on the trailing
+/// run that ends the workspace row flush right ([`WorkspaceRowCols`]).
 fn paint_tree_row(
     row: &VisibleRow,
     width: usize,
@@ -2025,13 +2059,13 @@ fn paint_tree_row(
     search_match: bool,
     search: Pill,
     ascii: bool,
-    decor: TreeRowDecor,
+    decor: TreeRowDecor<'_>,
     palette: Palette,
     col_offset: usize,
-) -> (Line<'static>, Vec<IconSpan>, usize) {
+) -> (Line<'static>, Vec<IconSpan>, WorkspaceRowCols) {
     let segs_width =
         |segs: &[TextSeg]| -> usize { segs.iter().map(|s| visible_width(&s.text)).sum() };
-    let mut total_cols = 0;
+    let mut workspace_cols = WorkspaceRowCols::default();
     let mut segs = painted_row_segments(
         row,
         ascii,
@@ -2047,6 +2081,9 @@ fn paint_tree_row(
         &row.chrome,
         width.saturating_sub(list_prefix_cols(row.depth)),
     );
+    if let Some(focus) = decor.focus {
+        highlight_focus_matches(row.kind, &mut segs.segments, focus);
+    }
     // The spinner, then the bars left of it, lead the trailing run: each is
     // a bare token one space before the rest, as the run packs its marks.
     // The run is right-aligned, so they come out of the label budget and
@@ -2086,14 +2123,17 @@ fn paint_tree_row(
             .saturating_sub(marks_width);
         segs.trailing.truncate(marks);
         let narrow = width < PR_REF_MIN_TREE_COLS;
-        let (summary, cols) = workspace_trailing_fit(&row.chrome, decor.pr_totals, narrow, room);
-        if summary.is_empty() && segs.trailing.last().is_some_and(|seg| seg.text == " ") {
+        let fit = workspace_trailing_fit(&row.chrome, decor.pr_totals, narrow, room, ascii);
+        if fit.segs.is_empty() && segs.trailing.last().is_some_and(|seg| seg.text == " ") {
             // No summary fits: drop the space after the marks so the last
             // mark stays in the last column.
             segs.trailing.pop();
         }
-        total_cols = cols;
-        segs.trailing.extend(summary);
+        workspace_cols = WorkspaceRowCols {
+            pr_total: fit.pr_total_cols,
+            chip: (fit.chip_cols > 0).then(|| (segs_width(&fit.segs), fit.chip_cols)),
+        };
+        segs.trailing.extend(fit.segs);
     }
     let icons = segmented_icon_spans(row.depth, &segs, width, col_offset);
     let line = paint_segmented_row(
@@ -2111,7 +2151,7 @@ fn paint_tree_row(
         palette,
         col_offset,
     );
-    (line, icons, total_cols)
+    (line, icons, workspace_cols)
 }
 
 /// Painted span of every icon segment of a row that
@@ -2323,7 +2363,16 @@ fn paint_segmented_row(
     let label = slice_segs(&segs.segments, col_offset, layout.label_budget);
     let label_width: usize = label.iter().map(|s| visible_width(&s.text)).sum();
     for seg in &label {
-        spans.push(styled_span(&seg.text, seg_style(seg, palette), bg));
+        if seg.role == SegRole::FocusMatch {
+            // Focus match: the search-match pill on any row background.
+            let style = Style::default()
+                .fg(search.fg)
+                .bg(search.bg)
+                .add_modifier(Modifier::BOLD);
+            spans.push(Span::styled(seg.text.clone(), style));
+        } else {
+            spans.push(styled_span(&seg.text, seg_style(seg, palette), bg));
+        }
     }
     let gap = layout
         .trailing_x
@@ -2388,6 +2437,9 @@ fn seg_role_color(role: SegRole, palette: Palette) -> Color {
         SegRole::BranchDefault => palette.branch_default,
         SegRole::BranchFeature => palette.branch_feature,
         SegRole::Plain => Color::Reset,
+        // Tree rows paint it on the search-match pill (`paint_segmented_row`);
+        // anywhere else it reads as a heading.
+        SegRole::FocusMatch => palette.heading,
     }
 }
 

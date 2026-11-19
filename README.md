@@ -158,6 +158,8 @@ An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG
 
 Pass `-a` or `--all` to include repos under `hiddenPaths` for that run (`maxDepth` is unchanged; `ignoredPaths` stays excluded). In the TUI, `.` shows or hides those repos at runtime (starts shown with `-a`, hidden without it). Hidden repos stay out of workspace operations unless you show them.
 
+In the TUI, `*` focuses the tree on the feature in the current branch name (`feature/ABC-123-x` → `ABC-123`), across repos; `*` again clears it. The palette (`:`) also has `Focus: this repo`, `Focus: type a query…` and `Focus: clear`. Repos outside the focus fold into one dimmed row, and workspace-row fetch, pull and default-branch switch skip them. The focus is saved per workspace root and restored at launch.
+
 Pass one or more repo paths to limit output (e.g. `ws app vendor-docs`). Named repos are included even when under `hiddenPaths` or `ignoredPaths`. Naming a primary does not bring back its linked worktrees under `ignoredPaths`; name such a worktree itself to see it. Named filters may also target linked paths under `.worktrees/` (same discovery as a full collect).
 
 ## Plain report markers

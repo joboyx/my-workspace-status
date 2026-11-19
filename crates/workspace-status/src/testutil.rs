@@ -11,7 +11,9 @@
 //! builds a [`RepoSnapshot`] row from scratch: tests set only the fields they
 //! care about, so a new field means one edit here, not one per test module.
 //! The app-state fixtures ([`app_state`], [`app_state_ascii`],
-//! [`app_state_of`]) build an [`AppState`] over those rows.
+//! [`app_state_of`], [`focus_state`]) build an [`AppState`] over those
+//! rows; [`put_cursor`], [`row_ids`], [`saved_focus`], and [`paint`] read
+//! or drive one.
 //!
 //! [`panic_hook_lock`] serializes the tests that touch the process-wide
 //! panic hook or let a worker job panic.
@@ -88,6 +90,44 @@ pub fn repo_snapshot(name: &str) -> RepoSnapshot {
     }
 }
 
+/// [`repo_snapshot`] for a primary checkout at `path` on `branch`.
+pub fn on_branch(path: &str, branch: &str) -> RepoSnapshot {
+    RepoSnapshot {
+        branch: branch.to_string(),
+        ..repo_snapshot(path)
+    }
+}
+
+/// [`repo_snapshot`] for a linked worktree of `primary` at `path` on
+/// `branch`.
+pub fn linked_checkout(path: &str, primary: &str, branch: &str) -> RepoSnapshot {
+    RepoSnapshot {
+        branch: branch.to_string(),
+        checkout_kind: CheckoutKind::Linked,
+        primary_repo: Some(primary.to_string()),
+        ..repo_snapshot(path)
+    }
+}
+
+/// The focus demo workspace: `app` (clean, on `main`) with linked worktrees
+/// `app/.worktrees/abc-123` on `feature/ABC-123-invoice-export` and
+/// `app/.worktrees/login` on `feature/login`; `services/api` on
+/// `feature/abc-123-api`; clean `lib`; dirty `notes` ([`repo`]).
+pub fn focus_workspace_repos() -> Vec<RepoSnapshot> {
+    vec![
+        repo_snapshot("app"),
+        linked_checkout(
+            "app/.worktrees/abc-123",
+            "app",
+            "feature/ABC-123-invoice-export",
+        ),
+        linked_checkout("app/.worktrees/login", "app", "feature/login"),
+        on_branch("services/api", "feature/abc-123-api"),
+        repo("lib", false),
+        repo("notes", true),
+    ]
+}
+
 /// One unstaged `M` edit of `path` (not staged, not untracked, no rename).
 pub fn unstaged_change(path: &str) -> FileChange {
     FileChange {
@@ -132,6 +172,44 @@ pub fn app_state_ascii(repos: &[RepoSnapshot], ascii: bool) -> AppState {
 /// filters): cwd `/tmp`, ASCII glyphs.
 pub fn app_state_of(snapshot: WorkspaceSnapshot) -> AppState {
     AppState::new(PathBuf::from("/tmp"), snapshot, true)
+}
+
+/// Test [`AppState`] over the focus demo workspace
+/// ([`focus_workspace_repos`]).
+pub fn focus_state() -> AppState {
+    app_state(&focus_workspace_repos())
+}
+
+/// Put the cursor of `app` on the tree row `id`. Panics with the row ids
+/// when no row has that id.
+pub fn put_cursor(app: &mut AppState, id: &str) {
+    app.cursor = app
+        .rows
+        .iter()
+        .position(|row| row.id == id)
+        .unwrap_or_else(|| panic!("missing row {id}: {:?}", row_ids(app)));
+}
+
+/// Ids of the visible tree rows of `app`, top to bottom.
+pub fn row_ids(app: &AppState) -> Vec<&str> {
+    app.rows.iter().map(|row| row.id.as_str()).collect()
+}
+
+/// The focus query the UI-state file of `app` holds for its workspace
+/// root, or `None` with no saved entry.
+pub fn saved_focus(app: &AppState) -> Option<String> {
+    crate::tui::ui_state_store::load_tree_focus(
+        &app.ui_store_path,
+        &crate::tui::workspace_store_id(&app.cwd),
+    )
+}
+
+/// Paint `app` on a `cols` × 30 test terminal; the painted buffer.
+pub fn paint(app: &mut AppState, cols: u16) -> ratatui::buffer::Buffer {
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(cols, 30)).unwrap();
+    terminal.draw(|frame| crate::tui::draw(frame, app)).unwrap();
+    terminal.backend().buffer().clone()
 }
 
 // ---------------------------------------------------------------------------

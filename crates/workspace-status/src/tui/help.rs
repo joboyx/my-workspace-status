@@ -26,12 +26,12 @@ use std::sync::LazyLock;
 use super::bindings::{
     chips, BLAME_MENU, BRANCH_PICKER, CLEAR_GRAPH_FOCUS, CLOSE_TAB, COMMENT, COPY_COMMENTS,
     COPY_ENTITY_REFERENCE, CTRL_C_EXIT, DEFAULT_BRANCH, EXPAND_COMMIT_MESSAGE, FETCH, FLAT_OR_TREE,
-    FOLD_FINISHED_PR_GROUPS, FOLD_ROW, FOLD_SUBTREE, FULL_FILE_CONTEXT, GO_TO_BOTTOM, GO_TO_FILE,
-    GO_TO_FILE_F, GO_TO_TOP, GRAPH_CREATE_BRANCH, GRAPH_FOCUS_BRANCHES, GRAPH_MERGE,
-    GRAPH_STASH_APPLY, GRAPH_STASH_DROP, GRAPH_STASH_POP, HALF_PAGE_DOWN, HALF_PAGE_UP,
-    HIGHLIGHT_LINES, ICON_POPOVER, IGNORE_WHITESPACE, INLINE_OR_SPLIT, KEYMAP_HELP, LINE_BLAME,
-    MARK_REVIEWED, MOVE_DOWN, MOVE_TO_END, MOVE_TO_START, MOVE_UP, NARROW_TREE, NAV_BACK,
-    NAV_ENTER, NEXT_FILE_TAB, NEXT_MATCH, NEXT_TAB, OPEN_IN_DIFF_TOOL, OPEN_IN_EDITOR,
+    FOCUS_THIS_FEATURE, FOLD_FINISHED_PR_GROUPS, FOLD_ROW, FOLD_SUBTREE, FULL_FILE_CONTEXT,
+    GO_TO_BOTTOM, GO_TO_FILE, GO_TO_FILE_F, GO_TO_TOP, GRAPH_CREATE_BRANCH, GRAPH_FOCUS_BRANCHES,
+    GRAPH_MERGE, GRAPH_STASH_APPLY, GRAPH_STASH_DROP, GRAPH_STASH_POP, HALF_PAGE_DOWN,
+    HALF_PAGE_UP, HIGHLIGHT_LINES, ICON_POPOVER, IGNORE_WHITESPACE, INLINE_OR_SPLIT, KEYMAP_HELP,
+    LINE_BLAME, MARK_REVIEWED, MOVE_DOWN, MOVE_TO_END, MOVE_TO_START, MOVE_UP, NARROW_TREE,
+    NAV_BACK, NAV_ENTER, NEXT_FILE_TAB, NEXT_MATCH, NEXT_TAB, OPEN_IN_DIFF_TOOL, OPEN_IN_EDITOR,
     OPEN_IN_EXPLORER, OPEN_PR, OPEN_PR_CI, OTHER_PANE, PAGE_DOWN, PAGE_UP, PAN_LEFT, PAN_RIGHT,
     PREVIOUS_FILE_TAB, PREVIOUS_MATCH, PREVIOUS_TAB, PRS_TAB, PULL, PUSH, QUICK_OPEN_COMMANDS,
     QUIT, REFRESH, REMOVE_WORKTREE, REVERT, SEARCH_IN_FILES, SEARCH_PANE, SHOW_HIDDEN, STAGE,
@@ -246,10 +246,13 @@ const HELP_PANE_SIZES: HelpEntry = HelpEntry {
     desc: "tree width",
 };
 
-/// `.` everywhere but the Explorer tab (VIEW).
+/// `.` and `*` everywhere but the Explorer tab (VIEW): the two keys that
+/// choose which repos the tree shows. `*` focuses the tree on the row's
+/// feature (again clears); the palette `Focus: …` rows set a repo or a
+/// typed query. One row, so the help keeps its height.
 const HELP_HIDDEN_REPOS: HelpEntry = HelpEntry {
-    keys: SHOW_HIDDEN.chip,
-    desc: "show / hide hidden repos",
+    keys: chips!(SHOW_HIDDEN.chip, FOCUS_THIS_FEATURE.chip),
+    desc: "show / hide hidden · focus this feature",
 };
 
 /// MOVE on every tab but Workspace: no `-` Explorer row.
@@ -474,7 +477,11 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: chips!(GRAPH_FOCUS_BRANCHES.chip, CLEAR_GRAPH_FOCUS.chip),
+            keys: chips!(
+                GRAPH_FOCUS_BRANCHES.chip,
+                CLEAR_GRAPH_FOCUS.chip,
+                FOCUS_THIS_FEATURE.chip
+            ),
             desc: "Workspace tab only",
         },
         HelpEntry {
@@ -589,7 +596,8 @@ pub const HELP_EXPLORER_GROUP: HelpGroup = HelpGroup {
             keys: chips!(
                 FLAT_OR_TREE.chip,
                 SHOW_HIDDEN.chip,
-                EXPAND_COMMIT_MESSAGE.chip
+                EXPAND_COMMIT_MESSAGE.chip,
+                FOCUS_THIS_FEATURE.chip
             ),
             desc: "Workspace tab only",
         },
@@ -704,7 +712,8 @@ pub const HELP_PRS_GROUP: HelpGroup = HelpGroup {
                 FLAT_OR_TREE.chip,
                 SHOW_HIDDEN.chip,
                 EXPAND_COMMIT_MESSAGE.chip,
-                OPEN_IN_EXPLORER.chip
+                OPEN_IN_EXPLORER.chip,
+                FOCUS_THIS_FEATURE.chip
             ),
             desc: "Workspace tab only",
         },
@@ -1520,7 +1529,15 @@ mod tests {
         assert!(!move_keys.contains(&"Ctrl-u Ctrl-d"));
         assert!(view_keys.contains(&"PgUp PgDn"));
         assert!(view_keys.contains(&"Ctrl-u Ctrl-d"));
-        assert!(view_keys.contains(&"."));
+        assert_eq!(
+            HELP_GROUPS[2]
+                .entries
+                .iter()
+                .find(|e| e.keys == ". *")
+                .map(|e| e.desc),
+            Some("show / hide hidden · focus this feature"),
+            "`*` shares the `.` row, so the help keeps its height"
+        );
         assert!(
             !view_keys.contains(&"T"),
             "themes are palette rows, not a key"
@@ -1847,7 +1864,7 @@ mod tests {
             "Ctrl-o diffs always show the whole file",
             "s u x S Workspace tab only",
             "f p P d Workspace tab only",
-            "t . M Workspace tab only",
+            "t . M * Workspace tab only",
         ] {
             assert!(
                 rows.iter()
@@ -1884,7 +1901,7 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|e| e.keys == "t . M -" && e.desc == "Workspace tab only"),
+                .any(|e| e.keys == "t . M - *" && e.desc == "Workspace tab only"),
             "{entries:?}"
         );
     }
@@ -1902,11 +1919,11 @@ mod tests {
             .collect();
         for entry in &entries {
             let keys: Vec<&str> = entry.keys.split(' ').collect();
-            let refused_row = keys.iter().all(|k| ["t", ".", "M"].contains(k))
+            let refused_row = keys.iter().all(|k| ["t", ".", "M", "*"].contains(k))
                 || keys
                     .iter()
                     .all(|k| ["s", "u", "x", "S", "f", "p", "P", "d"].contains(k));
-            for key in ["t", ".", "M", "o", "O", "gh"] {
+            for key in ["t", ".", "M", "*", "o", "O", "gh"] {
                 assert!(
                     !keys.contains(&key) || refused_row,
                     "{key} only as a Workspace tab only row: {entry:?}"
@@ -1978,7 +1995,7 @@ mod tests {
             "f p P d",
             "b c W",
             "S a p D",
-            "o O",
+            "o O * Workspace tab only",
             "r refresh now",
         ] {
             assert!(text.contains(needle), "{needle} missing: {text}");

@@ -885,6 +885,20 @@ pub fn icon_comment_resolved(ascii: bool) -> &'static str {
     IconKind::CommentResolved.glyph(ascii)
 }
 
+/// Focus chip mark of the workspace row: `◎` (U+25CE, a plain Unicode
+/// shape with no emoji form).
+pub const ICON_FOCUS_NERD: &str = "\u{25ce}";
+/// ASCII focus mark: `(o)`, a ring that reads as a target. It is chip text,
+/// not a catalog icon, so it may take three columns; no single ASCII mark
+/// is free (`@` is the repo glyph, `*` the viewed eye, `o` the open mark).
+pub const ICON_FOCUS_ASCII: &str = "(o)";
+
+/// Tree focus mark of the workspace-row focus chip. Nerd / Unicode: `◎`;
+/// ASCII: `(o)`.
+pub fn icon_focus(ascii: bool) -> &'static str {
+    glyph(ascii, ICON_FOCUS_NERD, ICON_FOCUS_ASCII)
+}
+
 /// Display columns reserved for the comment mark on every numbered diff cell.
 ///
 /// Always reserved so adding a comment does not shift line numbers. Both

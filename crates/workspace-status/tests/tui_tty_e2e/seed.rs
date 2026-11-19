@@ -210,6 +210,66 @@ pub fn two_unfetched_behind_workspace() -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+/// Four tracking primaries for the tree focus, each with its own bare
+/// origin under the fixture root, so a fetch stays offline.
+///
+/// `app` (`feature/ABC-123-invoice-export`) and `services/api`
+/// (`feature/ABC-123-api-client`) hold the ticket token `ABC-123`. `lib` is
+/// clean on `main`; `notes` is on `main` with a dirty `README.md`, the only
+/// changed file, so launch focuses `notes`. A focus on `ABC-123` keeps two of
+/// the four repos and leaves one dirty repo outside.
+pub fn tree_focus_workspace() -> (PathBuf, PathBuf) {
+    let root = unique_root("ws-tui-tty-tree-focus");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    for (name, branch, dirty) in [
+        ("app", Some("feature/ABC-123-invoice-export"), false),
+        ("services/api", Some("feature/ABC-123-api-client"), false),
+        ("lib", None, false),
+        ("notes", None, true),
+    ] {
+        let remote = root.join(format!("{}-origin.git", name.replace('/', "-")));
+        init_bare_remote(&remote);
+        seed_tracking_repo(&workspace, name, &remote);
+        let repo = workspace.join(name);
+        if let Some(branch) = branch {
+            git(&repo, &["checkout", "-q", "-b", branch]);
+        }
+        if dirty {
+            fs::write(repo.join("README.md"), format!("# {name}\ndirty\n")).unwrap();
+        }
+    }
+    (root, workspace)
+}
+
+/// Branch of the linked worktree that [`tree_focus_family_workspace`] adds
+/// to `app`: no ticket token, so an `ABC-123` focus leaves it out.
+pub const FOCUS_LINKED_BRANCH: &str = "feature/login-form";
+
+/// [`tree_focus_workspace`] where `app` is a family: its primary checkout
+/// on `feature/ABC-123-invoice-export` plus a clean linked worktree
+/// `app/.worktrees/login` on [`FOCUS_LINKED_BRANCH`] (from `main`).
+pub fn tree_focus_family_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace) = tree_focus_workspace();
+    let app = workspace.join("app");
+    fs::write(app.join(".gitignore"), ".worktrees/\n").unwrap();
+    git(&app, &["add", ".gitignore"]);
+    git(&app, &["commit", "-q", "-m", "ignore linked worktree dir"]);
+    git(
+        &app,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            FOCUS_LINKED_BRANCH,
+            ".worktrees/login",
+            "main",
+        ],
+    );
+    (root, workspace)
+}
+
 /// Local `syncbox` is behind `origin/main` (fetch already ran).
 pub fn behind_workspace() -> (PathBuf, PathBuf) {
     let (root, workspace) = unfetched_behind_workspace();
