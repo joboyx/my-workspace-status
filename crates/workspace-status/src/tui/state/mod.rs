@@ -10,6 +10,7 @@ mod dispatch_write;
 mod doctor;
 mod explorer_tab;
 mod file_view;
+mod focus_actions;
 mod focus_query;
 mod go_to_line;
 mod line_blame;
@@ -161,6 +162,7 @@ use super::watch::{
     GraphFlashMeta,
 };
 use crate::git::{DiffOpts, PushPlan, StashTarget, FULL_DIFF_CONTEXT_LINES};
+pub(crate) use focus_actions::FocusPromptState;
 use focus_query::FocusPreview;
 
 /// Status for a key drained while a git write runs and the job has no name.
@@ -1089,6 +1091,9 @@ pub struct AppState {
     /// The focus prompt's live preview while it runs
     /// ([`Self::preview_focus_query`]).
     focus_preview: Option<FocusPreview>,
+    /// The open focus prompt (palette `Focus: type a query…`); its draft
+    /// previews the tree live.
+    pub(crate) focus_prompt: Option<FocusPromptState>,
     /// Shared background-fetch store ([`crate::tui::fetch_claim`]). The
     /// scheduled fetch claims it and each watch tick reads its record; set
     /// by [`Self::open_background_fetch_store`].
@@ -1478,6 +1483,7 @@ impl AppState {
             ui_store_path,
             focus_query: None,
             focus_preview: None,
+            focus_prompt: None,
             fetch_store_path: PathBuf::new(),
             fetch_applied_generation: 0,
             comment: None,
@@ -1654,6 +1660,8 @@ impl AppState {
             InputMode::CommentExport
         } else if self.create_branch.is_some() {
             InputMode::CreateBranch
+        } else if self.focus_prompt.is_some() {
+            InputMode::FocusPrompt
         } else if self.branch_picker.is_some() {
             InputMode::BranchPicker
         } else if self.compare_picker.is_some() {
@@ -2720,7 +2728,9 @@ impl AppState {
         #[cfg(test)]
         REBUILD_ROWS_CALLS.with(|calls| calls.set(calls.get() + 1));
         let focus_id = self.focused_row().map(|r| r.id.clone());
+        let had_outside = self.has_outside_focus_group();
         self.tree = self.visible_tree();
+        self.sync_outside_focus_fold(had_outside);
         self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
         self.restore_focus_after_tree_rebuild(focus_id);
     }
@@ -3556,7 +3566,7 @@ impl AppState {
     }
 
     /// Plain left press: tabs, the PRs tab panes, the workspace PR total,
-    /// dividers, scrollbars, then the row under it.
+    /// the focus chip (clears the focus), dividers, scrollbars, then the row under it.
     fn click_at(&mut self, col: u16, row: u16) -> Effect {
         self.text_selection = None;
         self.pad_press = None;
@@ -3578,6 +3588,14 @@ impl AppState {
         {
             self.last_click = None;
             return self.open_prs_tab();
+        }
+        if self
+            .layout
+            .focus_chip_hit
+            .is_some_and(|hit| hit.contains(ratatui::layout::Position::new(col, row)))
+        {
+            self.last_click = None;
+            return self.clear_focus_query();
         }
         if let Some(effect) = self.press_split_hit(col, row) {
             return effect;

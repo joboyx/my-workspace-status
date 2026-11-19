@@ -1601,11 +1601,10 @@ pub fn node_segments(
         NodeKind::Workspace => workspace_segments(node, ascii),
         NodeKind::Repo => repo_segments(node, in_no_updates, ascii),
         NodeKind::Checkout => checkout_segments(node, in_no_updates, ascii),
+        // The label alone (`N outside focus · M dirty`); the focus glyph
+        // belongs to the chip.
         NodeKind::Group if node.id == OUTSIDE_FOCUS_GROUP_ID => NodeSegments {
-            segments: vec![
-                icon_seg(icon_focus(ascii), SegRole::Muted),
-                text_seg(node.label.clone(), SegRole::Muted),
-            ],
+            segments: vec![text_seg(node.label.clone(), SegRole::Muted)],
             trailing: Vec::new(),
         },
         NodeKind::Group => NodeSegments {

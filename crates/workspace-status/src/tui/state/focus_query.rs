@@ -41,22 +41,15 @@ struct RowAnchor {
     primary_repo: Option<String>,
 }
 
-/// The focus API that the focus key, palette rows, prompt, chip click and
-/// workspace-row actions call.
-// The callers land with the focus key and prompt (Task 3) and the
-// workspace-row actions (Task 4) of MYWS-099; `expect` fails the build once
-// they all call it, so this attribute cannot outlive them.
+/// The focus split that the workspace-row actions read.
+// The caller lands with the workspace-row actions (Task 4) of MYWS-099;
+// `expect` fails the build once it calls it, so this attribute cannot
+// outlive it.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "callers land in MYWS-099 Tasks 3 and 4")
+    expect(dead_code, reason = "the caller lands in MYWS-099 Task 4")
 )]
 impl AppState {
-    /// The applied focus query, or `None` when the tree shows every repo.
-    /// A preview draft does not change it.
-    pub(crate) fn focus_query(&self) -> Option<&TreeFocus> {
-        self.focus_query.as_ref()
-    }
-
     /// The visible snapshot split by the applied focus query: focused
     /// families with their kept checkouts, outside families, and the
     /// counts. `None` when no focus is set. Workspace-row actions read it.
@@ -64,6 +57,16 @@ impl AppState {
         let focus = self.focus_query.as_ref()?;
         let visible = visible_snapshot(&self.snapshot, self.show_hidden);
         Some(split_by_focus(focus, &visible))
+    }
+}
+
+/// The focus API that the focus key, palette rows, prompt and chip click
+/// call.
+impl AppState {
+    /// The applied focus query, or `None` when the tree shows every repo.
+    /// A preview draft does not change it.
+    pub(crate) fn focus_query(&self) -> Option<&TreeFocus> {
+        self.focus_query.as_ref()
     }
 
     /// Apply `query` as the focus query and save it for this workspace
@@ -189,13 +192,9 @@ impl AppState {
     /// [`Effect::LoadRightPane`] when the cursor row changed.
     fn rebuild_for_focus(&mut self, anchor: Option<RowAnchor>) -> Effect {
         let before = self.focused_row().map(|row| row.id.clone());
-        let had_outside = has_outside_group(&self.tree);
+        let had_outside = self.has_outside_focus_group();
         self.tree = self.visible_tree();
-        if !has_outside_group(&self.tree) {
-            self.folds.remove(OUTSIDE_FOCUS_GROUP_ID);
-        } else if !had_outside {
-            self.folds.insert(OUTSIDE_FOCUS_GROUP_ID.to_string());
-        }
+        self.sync_outside_focus_fold(had_outside);
         self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
         self.cursor = anchor
             .and_then(|anchor| self.nearest_visible_row(&anchor))
@@ -207,6 +206,24 @@ impl AppState {
             Effect::None
         } else {
             Effect::LoadRightPane
+        }
+    }
+
+    /// True when the tree has the outside-focus group now.
+    pub(super) fn has_outside_focus_group(&self) -> bool {
+        has_outside_group(&self.tree)
+    }
+
+    /// After a tree rebuild: fold the outside-focus group when it has just
+    /// appeared (`had_outside` is false), and drop its fold state when it
+    /// is gone. While it stays, its fold state stays. Every rebuild that
+    /// can make it appear calls this (a focus change, a watch snapshot, a
+    /// branch switch), so it always starts folded.
+    pub(super) fn sync_outside_focus_fold(&mut self, had_outside: bool) {
+        if !has_outside_group(&self.tree) {
+            self.folds.remove(OUTSIDE_FOCUS_GROUP_ID);
+        } else if !had_outside {
+            self.folds.insert(OUTSIDE_FOCUS_GROUP_ID.to_string());
         }
     }
 

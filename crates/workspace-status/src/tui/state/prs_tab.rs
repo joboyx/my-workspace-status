@@ -430,6 +430,10 @@ impl AppState {
             | Action::ConfirmYesClean => PRS_TAB_READ_ONLY,
             Action::ToggleTreeMode
             | Action::ToggleShowHidden
+            | Action::FocusThisFeature
+            | Action::FocusThisRepo
+            | Action::FocusClear
+            | Action::FocusPromptOpen
             | Action::ToggleCommitMsgExpand
             | Action::ResizeCommitMsg(_)
             | Action::ToggleFullContext

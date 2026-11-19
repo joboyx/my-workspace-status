@@ -103,7 +103,8 @@ pub(super) fn focused_children(
 /// for paint.
 ///
 /// Only repo and checkout rows (`kind`) highlight, and only their name and
-/// branch segments (the label segments with no icon tag). The split keeps
+/// branch segments ([`is_name_or_branch`]): the separator and the muted
+/// ` · <primary>` of a linked checkout stay as they are. The split keeps
 /// every column where it was, so icon spans and widths do not change.
 /// Paint calls it after the force-push text fit, which reads the name as
 /// one segment.
@@ -113,7 +114,7 @@ pub fn highlight_focus_matches(kind: NodeKind, segments: &mut Vec<TextSeg>, focu
     }
     let mut out = Vec::with_capacity(segments.len());
     for seg in segments.drain(..) {
-        let ranges = if seg.icon.is_none() {
+        let ranges = if is_name_or_branch(&seg) {
             match_ranges(focus, &seg.text)
         } else {
             Vec::new()
@@ -147,6 +148,15 @@ pub fn highlight_focus_matches(kind: NodeKind, segments: &mut Vec<TextSeg>, focu
         }
     }
     *segments = out;
+}
+
+/// True for the repo name and branch segments of a repo or checkout row
+/// label: text with no icon tag that is either bold (the repo path, the
+/// linked short name, a checkout's branch or name) or in a branch role (a
+/// repo row's branch).
+fn is_name_or_branch(seg: &TextSeg) -> bool {
+    seg.icon.is_none()
+        && (seg.bold || matches!(seg.role, SegRole::BranchFeature | SegRole::BranchDefault))
 }
 
 #[cfg(test)]

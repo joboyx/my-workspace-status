@@ -67,7 +67,7 @@ mod term_restore;
 pub(crate) mod theme;
 mod toast;
 mod tree;
-pub mod tree_focus;
+mod tree_focus;
 pub(crate) mod tty;
 pub(crate) mod ui_state_store;
 pub(crate) mod undercurl;

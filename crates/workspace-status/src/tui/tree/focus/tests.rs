@@ -43,7 +43,7 @@ fn feature_focus_puts_outside_families_in_the_last_group() {
     let rows = open_rows("ABC-123");
     let outside = row(&rows, OUTSIDE_FOCUS_GROUP_ID);
     assert_eq!(outside.kind, NodeKind::Group);
-    assert_eq!(outside.label, "(o) 2 outside focus · 1 dirty");
+    assert_eq!(outside.label, "2 outside focus · 1 dirty", "no glyph");
     let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
     assert_eq!(
         ids,
@@ -260,6 +260,35 @@ fn focus_matches_split_out_of_repo_and_branch_names() {
     let mut segs = workspace_row.segments.clone();
     highlight_focus_matches(workspace_row.kind, &mut segs, &TreeFocus::parse("ws"));
     assert_eq!(segs, workspace_row.segments, "only repo and checkout rows");
+}
+
+/// A linked checkout row lights its short name and branch, never the
+/// separator or the muted ` · <primary>` text.
+#[test]
+fn focus_matches_skip_the_primary_suffix_and_the_separator() {
+    let repos = [crate::testutil::linked_checkout(
+        "app/.worktrees/x",
+        "app",
+        "feature/app-x",
+    )];
+    let snapshot = build_workspace_snapshot(&repos, &[], false, &[]);
+    let tree = build_tree(&snapshot, true, "ws");
+    let rows = flatten_with(&tree, &HashSet::new(), true);
+    let linked = row(&rows, "repo:app/.worktrees/x");
+    assert!(
+        linked.segments.iter().any(|seg| seg.text == " · app"),
+        "{:?}",
+        linked.segments
+    );
+    let mut segs = linked.segments.clone();
+    highlight_focus_matches(linked.kind, &mut segs, &TreeFocus::parse("app, x"));
+    let matched: Vec<&str> = segs
+        .iter()
+        .filter(|seg| seg.role == SegRole::FocusMatch)
+        .map(|seg| seg.text.as_str())
+        .collect();
+    assert_eq!(matched, ["x", "app", "x"], "name and branch only");
+    assert!(segs.iter().any(|seg| seg.text == " · app"), "suffix intact");
 }
 
 /// Hidden repos are already out of the visible snapshot: a feature focus

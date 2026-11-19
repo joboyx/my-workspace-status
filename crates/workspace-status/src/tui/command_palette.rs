@@ -650,6 +650,38 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         &["hidden"],
         CommandScope::NoHighlight,
     ),
+    // The tree focus rows: `*` sets (or clears) the feature of the row.
+    bound(
+        "Focus: this feature",
+        bindings::FOCUS_THIS_FEATURE,
+        CommandGroup::View,
+        &["focus", "feature", "ticket", "narrow tree"],
+        CommandScope::NoHighlight,
+    ),
+    PaletteCommand {
+        title: "Focus: this repo",
+        keys: "",
+        group: CommandGroup::View,
+        action: Action::FocusThisRepo,
+        aliases: &["focus", "repo", "narrow tree"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Focus: type a query…",
+        keys: "",
+        group: CommandGroup::View,
+        action: Action::FocusPromptOpen,
+        aliases: &["focus", "narrow tree", "filter repos"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Focus: clear",
+        keys: "",
+        group: CommandGroup::View,
+        action: Action::FocusClear,
+        aliases: &["focus", "all repos", "show all"],
+        scope: CommandScope::NoHighlight,
+    },
     bound(
         "Inline / split",
         bindings::INLINE_OR_SPLIT,

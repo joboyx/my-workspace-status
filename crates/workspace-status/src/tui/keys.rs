@@ -101,6 +101,9 @@ pub enum InputMode {
     /// Graph `o` overlay: mark local branches, Enter applies ancestor focus.
     GraphFocusPicker,
     CreateBranch,
+    /// Tree focus prompt (palette `Focus: type a query…`): every printable
+    /// key types (`,` and space too), Enter applies, Esc restores.
+    FocusPrompt,
     /// `;` comment overlay (type body, Shift+Enter newline, Enter save,
     /// Ctrl-R resolve).
     Comment,
@@ -349,6 +352,7 @@ pub fn event_to_action_with(
                     | InputMode::ComparePicker
                     | InputMode::GraphFocusPicker
                     | InputMode::CreateBranch
+                    | InputMode::FocusPrompt
                     | InputMode::Comment
                     | InputMode::CommentExport
                     | InputMode::QuickOpen,
@@ -554,7 +558,10 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
     let typing = !key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Backspace | KeyCode::Char(_));
     match mode {
-        InputMode::SearchPrompt | InputMode::HelpSearch | InputMode::CreateBranch => typing,
+        InputMode::SearchPrompt
+        | InputMode::HelpSearch
+        | InputMode::CreateBranch
+        | InputMode::FocusPrompt => typing,
         InputMode::Comment => {
             typing
                 || matches!(
@@ -671,6 +678,7 @@ fn key_to_action(
             | InputMode::HelpSearch
             | InputMode::Comment
             | InputMode::CreateBranch
+            | InputMode::FocusPrompt
             | InputMode::BranchPicker
             | InputMode::ComparePicker
             | InputMode::GraphFocusPicker
@@ -694,6 +702,7 @@ fn key_to_action(
             | InputMode::HelpSearch
             | InputMode::Comment
             | InputMode::CreateBranch
+            | InputMode::FocusPrompt
             | InputMode::BranchPicker
             | InputMode::ComparePicker
             | InputMode::GraphFocusPicker
@@ -863,6 +872,17 @@ fn key_to_action(
             KeyCode::Backspace => Action::CreateBranchBackspace,
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::CreateBranchChar(c)
+            }
+            _ => Action::None,
+        },
+        // Every printable key types, `,` and space included: the query
+        // is free text.
+        InputMode::FocusPrompt => match key.code {
+            KeyCode::Esc => Action::FocusPromptCancel,
+            KeyCode::Enter => Action::FocusPromptSubmit,
+            KeyCode::Backspace => Action::FocusPromptBackspace,
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::FocusPromptChar(c)
             }
             _ => Action::None,
         },

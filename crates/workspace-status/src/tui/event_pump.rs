@@ -405,6 +405,7 @@ mod tests {
         assert!(overlay_blocks_background_ticks(InputMode::BranchPicker));
         assert!(overlay_blocks_background_ticks(InputMode::GraphFocusPicker));
         assert!(overlay_blocks_background_ticks(InputMode::CreateBranch));
+        assert!(overlay_blocks_background_ticks(InputMode::FocusPrompt));
         assert!(overlay_blocks_background_ticks(InputMode::Comment));
         assert!(overlay_blocks_background_ticks(InputMode::CommentExport));
         assert!(overlay_blocks_background_ticks(InputMode::Doctor));

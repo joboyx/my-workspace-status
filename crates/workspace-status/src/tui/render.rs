@@ -116,6 +116,7 @@ use crate::file_search::{SearchHit, SearchOptions};
 use crate::git::LineBlame;
 use crate::helpers::{is_detached_head_branch, visible_width};
 
+mod focus_prompt;
 mod prs_tab;
 
 /// Empty tree / empty commit-file list.
@@ -343,7 +344,10 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
         let rect = dialog_rect(chunks[1], width, dialog_height(state, kind, width));
         // Everything outside the box recedes. The copy frame below keeps
         // the dim: only colours change, so drag-copy reads the same text.
-        dim_backdrop(frame.buffer_mut(), area, rect, palette, state.no_color);
+        // The focus prompt keeps the tree bright: it previews the draft.
+        if kind != DialogKind::FocusPrompt {
+            dim_backdrop(frame.buffer_mut(), area, rect, palette, state.no_color);
+        }
         match kind {
             DialogKind::Help => {
                 let max = draw_help(frame, rect, state);
@@ -355,6 +359,7 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
             DialogKind::StashMenu => draw_stash_menu(frame, rect, state),
             DialogKind::BlameMenu => draw_blame_menu(frame, rect, state),
             DialogKind::CreateBranch => draw_create_branch(frame, rect, state),
+            DialogKind::FocusPrompt => focus_prompt::draw_focus_prompt(frame, rect, state),
             DialogKind::Comment => draw_comment(frame, rect, state),
             DialogKind::CommentExport => draw_comment_export(frame, rect, state),
             DialogKind::BranchPicker => draw_branch_picker(frame, rect, state),
@@ -1917,7 +1922,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             spinner,
             sparkline: bars,
             no_color: state.no_color,
-            focus: focus_query.clone(),
+            focus: focus_query.as_ref(),
         };
         let (line, icons, workspace_cols) = paint_tree_row(
             row,
@@ -1977,7 +1982,7 @@ type IconSpan = (IconKind, usize, usize);
 /// Per-row marks and live decorations a tree row paints beside its own
 /// segments.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct TreeRowDecor {
+struct TreeRowDecor<'a> {
     /// File row is marked reviewed.
     viewed: bool,
     /// Row has a comment.
@@ -2001,7 +2006,7 @@ struct TreeRowDecor {
     no_color: bool,
     /// The focus query the tree shows (the prompt draft while it
     /// previews): its matches highlight in repo and branch names.
-    focus: Option<TreeFocus>,
+    focus: Option<&'a TreeFocus>,
 }
 
 /// Columns of the workspace row's click areas, both counted on the
@@ -2051,7 +2056,7 @@ fn paint_tree_row(
     search_match: bool,
     search: Pill,
     ascii: bool,
-    decor: TreeRowDecor,
+    decor: TreeRowDecor<'_>,
     palette: Palette,
     col_offset: usize,
 ) -> (Line<'static>, Vec<IconSpan>, WorkspaceRowCols) {
@@ -2073,7 +2078,7 @@ fn paint_tree_row(
         &row.chrome,
         width.saturating_sub(list_prefix_cols(row.depth)),
     );
-    if let Some(focus) = &decor.focus {
+    if let Some(focus) = decor.focus {
         highlight_focus_matches(row.kind, &mut segs.segments, focus);
     }
     // The spinner, then the bars left of it, lead the trailing run: each is
