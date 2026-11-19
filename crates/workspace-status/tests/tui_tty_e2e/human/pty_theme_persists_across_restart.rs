@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
-use crate::support::{apply_palette_theme, WAIT};
+use crate::support::{apply_palette_theme, write_ui_store, WAIT};
 
 /// Painted chrome for the themes these tests launch into. Values match
 /// `pty_palette_theme_rows`; each is unique across the built-ins.
@@ -74,8 +74,7 @@ fn ui_store_body(theme: &str) -> String {
 
 /// Write a UI-state store at `path` the way the binary saves it.
 fn seed_ui_store(path: &Path, theme: &str) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, ui_store_body(theme)).unwrap();
+    write_ui_store(path, &ui_store_body(theme));
 }
 
 /// A palette theme row picks a theme; quit, relaunch, the theme is kept.
