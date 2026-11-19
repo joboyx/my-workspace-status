@@ -323,6 +323,8 @@ fn the_chip_outlasts_the_summary_on_a_narrow_tree() {
     app.set_focus_query("ABC-123");
     let mut chip_alone = false;
     for cols in 46..=200 {
+        // Each width is a fresh launch: the first paint fixes the tree width.
+        app.tree_cols = None;
         let buf = paint(&mut app, cols);
         // The workspace row: ASCII workspace glyph `#`, then the cwd name.
         let (y, _) = find(&buf, "# tmp");
