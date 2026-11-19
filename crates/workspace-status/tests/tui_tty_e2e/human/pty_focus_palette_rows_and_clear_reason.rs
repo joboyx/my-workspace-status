@@ -1,4 +1,5 @@
 use crate::harness::PtySession;
+use crate::pr_support::line_with;
 use crate::seed::tree_focus_workspace;
 use crate::support::{
     open_command_palette, tree_focus_first_paint, type_palette_filter, wait_screen, GIT_WAIT, WAIT,
@@ -11,11 +12,6 @@ const FOCUS_ROWS: [&str; 4] = [
     "Focus: type a query…",
     "Focus: clear",
 ];
-
-/// Screen row of the first line that contains `title`.
-fn row_of(screen: &str, title: &str) -> Option<usize> {
-    screen.lines().position(|line| line.contains(title))
-}
 
 /// `:` filter `focus` lists the four focus rows in order, and `Focus: clear`
 /// with no focus set is disabled with the reason `no focus set`.
@@ -44,13 +40,18 @@ fn pty_focus_palette_rows_and_clear_reason() {
     );
     let rows: Vec<usize> = FOCUS_ROWS
         .iter()
-        .map(|title| row_of(&screen, title).unwrap())
+        .map(|title| line_with(&screen, title).unwrap())
         .collect();
     assert!(
         rows.windows(2).all(|pair| pair[0] < pair[1]),
         "Focus rows must paint in the order {FOCUS_ROWS:?} (rows {rows:?}):\n{screen}"
     );
-    let line = |title: &str| screen.lines().nth(row_of(&screen, title).unwrap()).unwrap();
+    let line = |title: &str| {
+        screen
+            .lines()
+            .nth(line_with(&screen, title).unwrap())
+            .unwrap()
+    };
     assert!(
         line("Focus: clear").contains("no focus set"),
         "`Focus: clear` with no focus shows `no focus set`:\n{screen}"

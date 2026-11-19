@@ -30,6 +30,8 @@ git -C "$RUN/workspace/services/api" branch -m feature/rate-limit feature/ABC-12
 
 Absence checks read only the tree columns of a capture (`cut -c1-60`; the tree is 64 columns, and `cut` counts bytes, which are never fewer than columns), because the right pane shares the screen lines.
 
+Each run waits for the first diff (`STAGED`, the `session.ts` diff header) before its first key: the app reads keys only after its first load, which can take more than the 10 s default `wait` on a busy host.
+
 ## TF1 `*` focuses the feature, `*` again clears it
 
 ```bash
@@ -37,6 +39,7 @@ WS=.agents/skills/verify-workspace-status/scripts/wsctl
 RUN=$($WS start | jq -r .run)
 trap '$WS stop' EXIT
 $WS doctor
+$WS wait --timeout 60 'STAGED'
 git -C "$RUN/workspace/app" branch -m feature/auth-refresh feature/ABC-123-auth-refresh
 git -C "$RUN/workspace/services/api" branch -m feature/rate-limit feature/ABC-123-rate-limit
 $WS key --chord g g
@@ -65,7 +68,7 @@ $WS snap --name tf1-cleared --raw | grep -E 'v app .* 2 wt'
 
 Expect on `tf1-focused`: the workspace row ends with the chip `(o) ABC-123 · 2/4 repos`; the `app` family row shows `1/2 wt` and keeps only `& feature/ABC-123-auth-refresh` (no `L feature/login-page` row); `services/api` stays; the last tree row is the folded `> 2 outside focus · 0 dirty`, so no `merger` or `lib` row shows. The status says `focus: ABC-123` and the cursor stays on `session.ts`. On `evidence/NN-tf1-focused.ansi` the `ABC-123` part of both branch names paints in the search-match style (bold, filter pill colours). After the second `*`: `focus cleared`, no chip, `app` shows `2 wt` and its linked row again, and `merger` is back.
 
-**PASS:** every `wait` is ok, the three `grep` lines match `tf1-focused`, the `cut` check counts no `login-page` or `merger` in the tree columns, and the last `grep` matches `tf1-cleared`.
+**PASS:** every `wait` is ok, both `grep -E` lines match `tf1-focused`, the `cut` check counts no `login-page` or `merger` in the tree columns, and the last `grep` matches `tf1-cleared`.
 
 ## TF2 Typed query: live preview, then `Esc` restores the focus
 
@@ -73,6 +76,7 @@ Expect on `tf1-focused`: the workspace row ends with the chip `(o) ABC-123 · 2/
 WS=.agents/skills/verify-workspace-status/scripts/wsctl
 RUN=$($WS start | jq -r .run)
 trap '$WS stop' EXIT
+$WS wait --timeout 60 'STAGED'
 git -C "$RUN/workspace/app" branch -m feature/auth-refresh feature/ABC-123-auth-refresh
 git -C "$RUN/workspace/services/api" branch -m feature/rate-limit feature/ABC-123-rate-limit
 $WS key --chord g g
@@ -109,11 +113,12 @@ $WS wait --gone 'Focus tree'
 $WS wait '\(o\) ABC-123 · 2/4 repos'
 $WS wait '> 2 outside focus · 0 dirty'
 $WS wait --cursor 'session.ts'
+$WS snap --name tf2-restored --raw | grep -F '(o) ABC-123 · 2/4 repos'
 ```
 
 Expect: `Focus: type a query…` opens the `Focus tree` box with `query: ABC-123`, `2/4 repos in focus`, and the hint `Enter apply · Esc restore · empty clears`; the panes behind it are not dimmed. Seven Backspaces empty the draft (`query: …`, `no focus · every repo shows`) and the tree shows every repo at once. Typing `lib` previews `lib` alone: `1/4 repos in focus`, the chip `(o) lib · 1/4 repos`, and `> 3 outside focus · 2 dirty` (`app` and `services/api` are dirty). The UI-state file still holds `ABC-123`: a preview does not save. `Esc` says `focus unchanged` and brings back the `ABC-123` tree with the cursor on `session.ts`.
 
-**PASS:** every `wait` is ok, both `grep` lines match, and `jq -e` exits 0.
+**PASS:** every `wait` is ok, the three `grep` lines match, and `jq -e` exits 0.
 
 ## TF3 Palette rows: order, disabled reasons, `Focus: clear`
 
@@ -121,6 +126,7 @@ Expect: `Focus: type a query…` opens the `Focus tree` box with `query: ABC-123
 WS=.agents/skills/verify-workspace-status/scripts/wsctl
 RUN=$($WS start | jq -r .run)
 trap '$WS stop' EXIT
+$WS wait --timeout 60 'STAGED'
 $WS key --chord g g
 $WS wait --cursor '# workspace'
 $WS key :
@@ -149,11 +155,12 @@ $WS wait --gone 'Focus: this repo'
 $WS key Enter
 $WS wait 'focus cleared'
 $WS wait --gone 'auth-refresh · 1/4 repos'
+$WS snap --name tf3-cleared --raw | cut -c1-60 | grep -E 'v merger'
 ```
 
-Expect on `tf3-workspace-row`: the filter `focus:` lists exactly the four rows in the order `Focus: this feature` (chip `*`), `Focus: this repo`, `Focus: type a query…`, `Focus: clear`. On the workspace row the first two are dimmed with `focus a repo or checkout` at the right edge, and `Focus: clear` with `no focus set`; the cursor lands on `Focus: type a query…`, the first enabled row. On `session.ts` (seed branch `feature/auth-refresh`, no ticket) `*` takes the fallback token `auth-refresh` (`1/4 repos`), and on `tf3-file-row` no row has a reason. `Focus: clear` runs and says `focus cleared`.
+Expect on `tf3-workspace-row`: the filter `focus:` lists exactly the four rows in the order `Focus: this feature` (chip `*`), `Focus: this repo`, `Focus: type a query…`, `Focus: clear`. On the workspace row the first two are dimmed with `focus a repo or checkout` at the right edge, and `Focus: clear` with `no focus set`; the cursor lands on `Focus: type a query…`, the first enabled row. On `session.ts` (seed branch `feature/auth-refresh`, no ticket) `*` takes the fallback token `auth-refresh` (`1/4 repos`), and on `tf3-file-row` no row has a reason. `Focus: clear` runs and says `focus cleared` (a short status: read it with `wait`, not a later capture), and `tf3-cleared` shows `v merger` again.
 
-**PASS:** every `wait` is ok, the `[ … ]` order test is true, the three reason `grep` lines match `tf3-workspace-row`, and the count check finds no reason on `tf3-file-row`.
+**PASS:** every `wait` is ok, the `[ … ]` order test is true, the three reason `grep` lines match `tf3-workspace-row`, the count check finds no reason on `tf3-file-row`, and the last `grep` matches `tf3-cleared`.
 
 ## TF4 `Focus: this repo` keeps the whole family
 
@@ -161,6 +168,7 @@ Expect on `tf3-workspace-row`: the filter `focus:` lists exactly the four rows i
 WS=.agents/skills/verify-workspace-status/scripts/wsctl
 RUN=$($WS start | jq -r .run)
 trap '$WS stop' EXIT
+$WS wait --timeout 60 'STAGED'
 $WS key /
 $WS wait 'SEARCH'
 $WS type rate-limit
@@ -213,6 +221,7 @@ Expect: no rename here. On the `services/api` row, `Focus: this repo` sets the q
 WS=.agents/skills/verify-workspace-status/scripts/wsctl
 RUN=$($WS start | jq -r .run)
 trap '$WS stop' EXIT
+$WS wait --timeout 60 'STAGED'
 git -C "$RUN/workspace/app" branch -m feature/auth-refresh feature/ABC-123-auth-refresh
 git -C "$RUN/workspace/services/api" branch -m feature/rate-limit feature/ABC-123-rate-limit
 $WS key --chord g g
@@ -237,11 +246,12 @@ $WS key j
 $WS wait --cursor 'v merger'
 $WS wait 'merge billing into main'
 $WS wait '\(o\) ABC-123 · 2/4 repos'
+$WS snap --name tf5-merger --raw | grep -F 'merge billing into main'
 ```
 
 Expect: `G` lands on the folded outside row, `z` opens it (`v 2 outside focus · 0 dirty`). Under it the outside families list in the normal order with no nested `No updates` group: the attention family `merger` (both `feature/reconciliation` checkouts), then the clean `lib  main`, with no clean check. On `NN-tf5-open.ansi` the outside row and every row under it paint in the muted colour, like a hidden repo. The chip stays: opening the row does not clear the focus. The cursor can move into it, and `merger` shows its graph (`merge billing into main`).
 
-**PASS:** every `wait` is ok and the `awk` check finds `v merger` above `lib  main` in the tree columns of `tf5-open`.
+**PASS:** every `wait` is ok, the `awk` check finds `v merger` above `lib  main` in the tree columns of `tf5-open`, and the `grep` matches `tf5-merger`.
 
 ## TF6 Workspace-row `f` fetches the focused repos only
 
@@ -249,6 +259,7 @@ Expect: `G` lands on the folded outside row, `z` opens it (`v 2 outside focus ·
 WS=.agents/skills/verify-workspace-status/scripts/wsctl
 RUN=$($WS start | jq -r .run)
 trap '$WS stop' EXIT
+$WS wait --timeout 60 'STAGED'
 git -C "$RUN/workspace/app" branch -m feature/auth-refresh feature/ABC-123-auth-refresh
 git -C "$RUN/workspace/services/api" branch -m feature/rate-limit feature/ABC-123-rate-limit
 $WS key --chord g g
@@ -285,6 +296,7 @@ Expect: `*` on the `app` family row reads the primary checkout's branch (`ABC-12
 WS=.agents/skills/verify-workspace-status/scripts/wsctl
 RUN=$($WS start | jq -r .run)
 trap '$WS stop' EXIT
+$WS wait --timeout 60 'STAGED'
 git -C "$RUN/workspace/app" branch -m feature/auth-refresh feature/ABC-123-auth-refresh
 git -C "$RUN/workspace/services/api" branch -m feature/rate-limit feature/ABC-123-rate-limit
 $WS key --chord g g
@@ -305,11 +317,13 @@ $WS wait '\(o\) ABC-123 · 2/4 repos'
 $WS wait '> 2 outside focus · 0 dirty'
 $WS wait --cursor 'session.ts'
 $WS snap --name tf7-restored --raw | grep -F 'focus restored: ABC-123'
+$WS wait --timeout 60 'STAGED'
 $WS key '*'
 $WS wait 'focus cleared'
+$WS snap --name tf7-cleared --raw | cut -c1-60 | grep -F 'L feature/login-page'
 jq -e 'has("treeFocus") | not' "$RUN/state/ui-state.json"
 ```
 
-Expect: the first run saves `"treeFocus": {"<workspace id>": "ABC-123"}` in its UI-state file (the id is the SHA-256 of the workspace root path). The second run, on the same fixture and file, starts focused with no key pressed: the status line says `focus restored: ABC-123`, the chip and the folded outside row are there, and the cursor is on `session.ts`. `*` then clears the focus and removes the key from the file.
+Expect: the first run saves `"treeFocus": {"<workspace id>": "ABC-123"}` in its UI-state file (the id is the SHA-256 of the workspace root path). The second run, on the same fixture and file, starts focused with no key pressed: the status line says `focus restored: ABC-123`, the chip and the folded outside row are there, and the cursor is on `session.ts`. `*` then clears the focus (`tf7-cleared` shows the linked `L feature/login-page` row again) and removes the key from the file.
 
-**PASS:** every `wait` is ok, the `grep` matches `tf7-restored`, and both `jq -e` exit 0.
+**PASS:** every `wait` is ok, the `grep` lines match `tf7-restored` and `tf7-cleared`, and both `jq -e` exit 0.
