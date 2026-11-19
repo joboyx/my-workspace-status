@@ -35,7 +35,7 @@ The `lib` row (local remote, no forge) has no badge. A checkout whose first look
 
 ## TG2 Glyph column at wide and narrow widths
 
-The glyph is the last cell of every badge, so all glyphs of a capture stand in one column. Under 50 tree columns the refs drop on every row and only glyphs stay. The tree is 40% of the terminal width: the default `160x45` gives a 64-column tree, `100x40` gives 40 columns, and a tree of exactly 50 columns inside its border needs 130 terminal columns.
+The glyph is the last cell of every badge, so all glyphs of a capture stand in one column. Under 50 tree columns the refs drop on every row and only glyphs stay. A launch gives the tree 40% of the terminal width (at most 80 columns; [pane-split](pane-split.md)): the default `160x45` gives a 64-column tree, `100x40` gives 40 columns, and a tree of exactly 50 columns inside its border needs 130 terminal columns.
 
 ```bash
 fresh context github-review gitlab-ready -- --fake-forge "$FORGE"
