@@ -653,7 +653,7 @@ pub fn tree_label_col(screen: &str, needle: &str) -> u16 {
         .unwrap_or_else(|| panic!("{needle} on the left tree:\n{screen}"))
 }
 
-/// Right pane on the default 140-col layout (tree fraction 0.4).
+/// Right pane on the default 140-col layout (launch tree width, 40% of the terminal).
 pub const RIGHT_PANE_COL: u16 = 90;
 
 /// ASCII collapsed chevron (`>`) on the left-tree row that contains `name`.

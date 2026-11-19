@@ -73,9 +73,8 @@ fn fixture(
 /// (read off the cell grid), every row's glyph sits in the tree's edge
 /// cell, and the refs are on every row exactly when `inner` is 50 or more.
 ///
-/// A fresh launch, not a resize: the split a resize leaves does not follow
-/// the width (the tree keeps the share it had), so only a launch gives a
-/// known inner width.
+/// A fresh launch, not a resize: a resize keeps the tree's columns, so
+/// only a launch gives a known inner width.
 fn launch_at(prefix: &str, cols: u16, inner: u16) {
     let (_root, workspace, forge, board) = fixture(prefix);
     let tui = PtySession::open_size_with_env(&workspace, cols, 36, &forge_env(&forge, &[]));

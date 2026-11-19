@@ -10,7 +10,7 @@ use crate::support::{
 };
 
 const REPO: &str = "longsubj";
-/// Right pane on an 80-col layout (tree fraction 0.4 → `right_x` ≈ 32).
+/// Right pane on an 80-col layout (launch tree width, 40% of the terminal → `right_x` ≈ 32).
 const NARROW_RIGHT_COL: u16 = 50;
 /// Graph body row (below the pane title). Same cell as keep-middle wheel.
 const GRAPH_BODY_ROW: u16 = 8;

@@ -12,7 +12,7 @@ use crate::support::{
 };
 
 const FILE: &str = "unique-diffline.rs";
-/// Right pane on an 80-col layout (tree fraction 0.4 → `right_x` ≈ 32).
+/// Right pane on an 80-col layout (launch tree width, 40% of the terminal → `right_x` ≈ 32).
 const NARROW_RIGHT_COL: u16 = 50;
 /// xterm SGR left-button drag (`Cb` 0 + motion bit 32).
 const SGR_LEFT_DRAG: u8 = 32;
