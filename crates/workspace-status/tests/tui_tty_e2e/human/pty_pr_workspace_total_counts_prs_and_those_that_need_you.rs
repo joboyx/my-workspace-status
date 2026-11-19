@@ -23,8 +23,9 @@ fn total_row(tui: &PtySession, name: &str) -> String {
 /// review does not.
 ///
 /// Proof: the row ends in `2 PRs · 2 need you`, with `2 PRs` muted and
-/// `2 need you` amber and bold. A narrow tree (120 columns, under the
-/// 50-column rule) shows only `2 need you`. After the swaps the total reads
+/// `2 need you` amber and bold. A narrow tree (`<` from the 56-column
+/// launch tree to 49 columns, under the 50-column rule) shows only
+/// `2 need you`. After the swaps the total reads
 /// `2 PRs · 1 needs you` (singular verb), `2 PRs` with none needing you, and
 /// `1 PR` when one checkout loses its PR. Reverting the total drops the
 /// text from the row; reverting the singular, narrow, or none rules fails
@@ -61,13 +62,14 @@ fn pty_pr_workspace_total_counts_prs_and_those_that_need_you() {
         "`2 need you` paints amber and bold"
     );
 
-    tui.resize(120, 32);
+    // `<` narrows the 56-column tree by 7 columns to 49.
+    tui.key('<');
     tui.wait_pred(
         |_| total_is(&tui, "# ws", "2 need you") && !total_row(&tui, "# ws").contains("PRs"),
         "a tree under 50 columns shows only `2 need you`",
         GIT_WAIT,
     );
-    tui.resize(140, 32);
+    tui.key('>');
 
     gitlab.set(&forge, Badge::InReview);
     tui.wait_pred(
@@ -100,8 +102,8 @@ fn pty_pr_workspace_total_counts_prs_and_those_that_need_you() {
 /// `appbox` (GitHub `#7`) is CI failed and `apibox` (GitLab `!5`) is ready.
 ///
 /// Proof: the tree is 50 columns or wider (the badge still carries its ref),
-/// and the row ends in `2 need you`, amber and bold, with no `PRs` on it. At
-/// 160 columns both parts fit again. With both PRs in review nothing needs
+/// and the row ends in `2 need you`, amber and bold, with no `PRs` on it. In
+/// a tree two `>` wider both parts fit again. With both PRs in review nothing needs
 /// you and the row shows `2 PRs`. The old order (`2 PRs` kept, `need you`
 /// dropped first) shows `2 PRs` at 140 columns and fails the first wait.
 #[test]
@@ -137,14 +139,17 @@ fn pty_pr_workspace_total_keeps_need_you_when_the_row_is_short() {
         "`2 need you` paints amber and bold"
     );
 
-    tui.resize(160, 32);
+    // Two `>` widen the 56-column tree by 7 columns each, to 70.
+    tui.key('>');
+    tui.key('>');
     tui.wait_pred(
         |_| total_is(&tui, "# workspace", "2 PRs · 2 need you"),
-        "at 160 columns both parts fit: `2 PRs · 2 need you`",
+        "in a 70-column tree both parts fit: `2 PRs · 2 need you`",
         GIT_WAIT,
     );
 
-    tui.resize(140, 32);
+    tui.key('<');
+    tui.key('<');
     github.set(&forge, Badge::InReview);
     gitlab.set(&forge, Badge::InReview);
     tui.wait_pred(

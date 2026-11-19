@@ -1,32 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
-use crate::support::{pane_top, title_has_diff, tree_has, TREE_LABEL_COL, WAIT};
-
-/// 0-based column of the tree/right box join (`┐┌` / `││` / `┘└`).
-fn pane_join_col(screen: &str) -> Option<u16> {
-    let line = screen.lines().next()?;
-    for sep in ["┐┌", "││", "┘└"] {
-        if let Some(byte_at) = line.find(sep) {
-            return Some(line[..byte_at].chars().count() as u16);
-        }
-    }
-    screen.lines().skip(1).find_map(|line| {
-        line.find("││")
-            .map(|byte_at| line[..byte_at].chars().count() as u16)
-    })
-}
-
-/// Tree/right join on the top border, once the frame paints `cols` wide.
-///
-/// The parser grid takes the new size before the TUI repaints, so an old
-/// frame keeps its shorter border line until the new one lands.
-fn join_at_width(screen: &str, cols: u16) -> Option<u16> {
-    let line = screen.lines().find(|line| line.contains("┐┌"))?;
-    if line.chars().count() != usize::from(cols) {
-        return None;
-    }
-    pane_join_col(line)
-}
+use crate::support::{
+    pane_join_col, pane_top, title_has_diff, tree_has, wait_join_at_width, TREE_LABEL_COL, WAIT,
+};
 
 fn join_line_count(screen: &str) -> usize {
     screen.lines().filter(|line| line.contains("││")).count()
@@ -211,59 +187,39 @@ fn pty_terminal_resize_relayouts() {
     }
 }
 
-/// Wait for the frame at `cols` and return its tree/right join column.
-fn wait_join_at_width(tui: &PtySession, cols: u16, what: &str) -> u16 {
-    tui.wait_pred(|screen| join_at_width(screen, cols).is_some(), what, WAIT);
-    join_at_width(&tui.screen(), cols).unwrap_or_else(|| panic!("{what}:\n{}", tui.screen()))
-}
-
-/// A terminal resized one column at a time paints the tree width of a
-/// fresh launch at the end size, and a tree the narrowest terminal
-/// squeezed comes back when the terminal grows again.
+/// A terminal resized one column at a time keeps the tree columns of the
+/// launch, and a tree the narrowest terminal squeezed comes back when the
+/// terminal grows again.
 ///
 /// A drag resize of the terminal sends one resize per column. Fail if a
-/// resize rounds the stored split down to whole columns: from 124 to 134
-/// columns the join then lands left of the fresh 134-column join.
+/// resize moves the join: from 124 to 134 columns the tree keeps the 49
+/// columns of the 124-column launch (join at column 48), and the extra
+/// columns go to the right pane.
 #[test]
-fn pty_stepwise_terminal_resize_keeps_the_fresh_launch_tree_width() {
-    // A session removes its fixture on drop, so each launch gets its own.
-    let fresh = {
-        let (_root, workspace) = daily_workspace();
-        let tui = PtySession::open_size(&workspace, 134, 40);
-        wait_join_at_width(
-            &tui,
-            134,
-            "fresh 134-col first paint with a tree/right join",
-        )
-    };
-
+fn pty_stepwise_terminal_resize_keeps_the_launch_tree_columns() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open_size(&workspace, 124, 40);
-    wait_join_at_width(&tui, 124, "124-col first paint with a tree/right join");
+    let launch = wait_join_at_width(&tui, 124, "124-col first paint with a tree/right join");
+    assert_eq!(launch, 48, "a 49-col launch tree:\n{}", tui.screen());
     for cols in 125..=134 {
         tui.resize(cols, 40);
-        wait_join_at_width(
+        let join = wait_join_at_width(
             &tui,
             cols,
             &format!("{cols}-col repaint after a one-column resize"),
         );
+        assert_eq!(join, launch, "{cols} cols keep the join:\n{}", tui.screen());
     }
-    let stepped = wait_join_at_width(&tui, 134, "134-col paint after the resize steps");
-    assert_eq!(
-        stepped,
-        fresh,
-        "resize steps 124 -> 134 paint the fresh-launch join:\n{}",
-        tui.screen()
-    );
 
     tui.resize(46, 40);
-    wait_join_at_width(&tui, 46, "46-col repaint (the narrowest two-pane frame)");
+    let narrow = wait_join_at_width(&tui, 46, "46-col repaint (the narrowest two-pane frame)");
+    assert!(narrow < launch, "the narrowest frame clamps the tree");
     tui.resize(134, 40);
     let restored = wait_join_at_width(&tui, 134, "134-col repaint after the narrow frame");
     assert_eq!(
         restored,
-        fresh,
-        "the tree comes back to its fresh-launch width after a narrow frame:\n{}",
+        launch,
+        "the tree comes back to its launch columns after a narrow frame:\n{}",
         tui.screen()
     );
 }

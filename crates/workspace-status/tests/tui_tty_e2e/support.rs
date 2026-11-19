@@ -609,6 +609,39 @@ pub const TREE_DEPTH1_CHEVRON_COL: u16 = 4;
 /// Label column past the chevron (same as the tree-hscroll setup click).
 pub const TREE_LABEL_COL: u16 = 8;
 
+/// 0-based column of the tree/right box join (`┐┌` / `││` / `┘└`): the
+/// tree pane's right border, so a tree `w` columns wide joins at `w − 1`.
+pub fn pane_join_col(screen: &str) -> Option<u16> {
+    let line = screen.lines().next()?;
+    for sep in ["┐┌", "││", "┘└"] {
+        if let Some(byte_at) = line.find(sep) {
+            return Some(line[..byte_at].chars().count() as u16);
+        }
+    }
+    screen.lines().skip(1).find_map(|line| {
+        line.find("││")
+            .map(|byte_at| line[..byte_at].chars().count() as u16)
+    })
+}
+
+/// Tree/right join on the top border, once the frame paints `cols` wide.
+///
+/// The parser grid takes the new size before the TUI repaints, so an old
+/// frame keeps its shorter border line until the new one lands.
+pub fn join_at_width(screen: &str, cols: u16) -> Option<u16> {
+    let line = screen.lines().find(|line| line.contains("┐┌"))?;
+    if line.chars().count() != usize::from(cols) {
+        return None;
+    }
+    pane_join_col(line)
+}
+
+/// Wait for the frame at `cols` and return its tree/right join column.
+pub fn wait_join_at_width(tui: &PtySession, cols: u16, what: &str) -> u16 {
+    tui.wait_pred(|screen| join_at_width(screen, cols).is_some(), what, WAIT);
+    join_at_width(&tui.screen(), cols).unwrap_or_else(|| panic!("{what}:\n{}", tui.screen()))
+}
+
 /// Column of the first cell of `needle` on its left-tree row, for a click
 /// on a row's name. On a depth-2 file row [`TREE_LABEL_COL`] is the file
 /// devicon, and a click on an icon pins its popover instead.
