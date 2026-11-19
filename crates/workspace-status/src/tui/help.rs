@@ -252,7 +252,7 @@ const HELP_PANE_SIZES: HelpEntry = HelpEntry {
 /// typed query. One row, so the help keeps its height.
 const HELP_HIDDEN_REPOS: HelpEntry = HelpEntry {
     keys: chips!(SHOW_HIDDEN.chip, FOCUS_THIS_FEATURE.chip),
-    desc: "hidden repos · focus feature",
+    desc: "show / hide hidden · focus this feature",
 };
 
 /// MOVE on every tab but Workspace: no `-` Explorer row.
@@ -1535,7 +1535,7 @@ mod tests {
                 .iter()
                 .find(|e| e.keys == ". *")
                 .map(|e| e.desc),
-            Some("hidden repos · focus feature"),
+            Some("show / hide hidden · focus this feature"),
             "`*` shares the `.` row, so the help keeps its height"
         );
         assert!(

@@ -25,6 +25,9 @@ pub(crate) const NO_FEATURE_ON_DEFAULT_BRANCH: &str = "no feature on the default
 pub(crate) const NO_FEATURE_ON_DETACHED_HEAD: &str = "no feature on a detached HEAD";
 /// Reason when the row's checkout HEAD could not be read.
 pub(crate) const NO_FEATURE_ON_UNKNOWN_HEAD: &str = "no feature on an unknown HEAD";
+/// Reason when a non-default branch name leaves no feature token (only a
+/// prefix, such as `feature/`).
+pub(crate) const NO_FEATURE_IN_BRANCH_NAME: &str = "no feature in this branch name";
 /// Reason for `Focus: clear` with no focus applied.
 pub(crate) const NO_FOCUS_SET: &str = "no focus set";
 /// Status after Esc in the focus prompt.
@@ -135,7 +138,7 @@ impl AppState {
         if is_default_branch(branch, override_name) {
             return Err(NO_FEATURE_ON_DEFAULT_BRANCH);
         }
-        feature_token(branch, override_name).ok_or(NO_FEATURE_ON_DEFAULT_BRANCH)
+        feature_token(branch, override_name).ok_or(NO_FEATURE_IN_BRANCH_NAME)
     }
 
     /// The "this repo" query of the focused row: its family primary repo

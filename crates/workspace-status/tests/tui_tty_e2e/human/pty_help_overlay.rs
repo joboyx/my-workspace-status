@@ -48,7 +48,7 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("i \\ M B", "inline / split · wrap · msg · blame"),
     ("< >", "tree width"),
     ("t", "flat / tree · Staged split"),
-    (". *", "hidden repos · focus feature"),
+    (". *", "show / hide hidden · focus this feature"),
     ("Ctrl-o w", "full-file · keep hunk in view · whitespace"),
     ("o O", "focus branches / clear (graph · repo)"),
     ("PgUp PgDn", "page focused pane"),

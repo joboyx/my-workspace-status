@@ -198,7 +198,8 @@ fn checkout_is_dirty(repo: &WorkspaceRepoSnapshot) -> bool {
 /// `<prefix>/` removed (`feature/auth-refresh` → `auth-refresh`; a branch
 /// with no `/` is its own token). `None` on the default branch (see
 /// [`is_default_branch`] with `default_branch_override`), a detached HEAD,
-/// and an unknown HEAD (see [`is_counted_local_branch`]).
+/// an unknown HEAD (see [`is_counted_local_branch`]), and a name that is
+/// only a prefix (`feature/`), which leaves no token.
 pub fn feature_token(branch: &str, default_branch_override: Option<&str>) -> Option<String> {
     if !is_counted_local_branch(branch) || is_default_branch(branch, default_branch_override) {
         return None;
@@ -207,8 +208,12 @@ pub fn feature_token(branch: &str, default_branch_override: Option<&str>) -> Opt
         return Some(ticket.to_string());
     }
     let rest = branch.split_once('/').map_or(branch, |(_, rest)| rest);
-    let token = if rest.is_empty() { branch } else { rest };
-    Some(token.to_string())
+    if rest.is_empty() {
+        // A bare prefix (`feature/`) names no feature: as a query it would
+        // match every branch of that prefix.
+        return None;
+    }
+    Some(rest.to_string())
 }
 
 /// First match of `[A-Za-z][A-Za-z0-9]*-[0-9]+` in `text`.
@@ -504,6 +509,11 @@ mod tests {
             assert_eq!(feature_token(branch, None), None, "{branch:?}");
         }
         assert_eq!(feature_token("trunk", Some("trunk")), None);
+        assert_eq!(
+            feature_token("feature/", None),
+            None,
+            "a bare prefix leaves no token"
+        );
         assert_eq!(
             feature_token("main", Some("trunk")).as_deref(),
             Some("main"),

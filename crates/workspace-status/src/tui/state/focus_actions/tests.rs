@@ -118,12 +118,19 @@ fn feature_preset_names_why_it_cannot_run() {
         on_branch("lost", "(unknown)"),
         repo("main-repo", false),
         on_branch("feat", "feature/auth-refresh"),
+        on_branch("bare", "feature/"),
     ]);
     let reason = |app: &AppState| palette_reason(app, Action::FocusThisFeature);
     put_cursor(&mut app, "workspace");
     assert_eq!(reason(&app).as_deref(), Some(FOCUS_A_REPO_OR_CHECKOUT));
     put_cursor(&mut app, "repo:detached");
     assert_eq!(reason(&app).as_deref(), Some(NO_FEATURE_ON_DETACHED_HEAD));
+    put_cursor(&mut app, "repo:bare");
+    assert_eq!(
+        reason(&app).as_deref(),
+        Some(NO_FEATURE_IN_BRANCH_NAME),
+        "a bare prefix is not the default branch"
+    );
     put_cursor(&mut app, "repo:lost");
     assert_eq!(reason(&app).as_deref(), Some(NO_FEATURE_ON_UNKNOWN_HEAD));
     put_cursor(&mut app, "repo:feat");
@@ -361,4 +368,43 @@ fn a_click_on_the_focus_chip_clears_the_focus() {
     assert_eq!(applied(&app), None);
     assert_eq!(saved(&app), None);
     assert_eq!(app.status, "focus cleared");
+}
+
+/// The chip hit-test takes only the chip cells: a click left of it on
+/// the workspace row selects that row, and the focus stays.
+#[test]
+fn a_click_left_of_the_focus_chip_selects_the_workspace_row() {
+    let mut app = state();
+    app.set_focus_query("ABC-123");
+    put_cursor(&mut app, "repo:services/api");
+    paint(&mut app, 160);
+    let hit = app.layout.focus_chip_hit.expect("the chip painted");
+    assert!(hit.x > 0, "{hit:?}");
+    app.dispatch(Action::Click {
+        col: hit.x - 1,
+        row: hit.y,
+    });
+    assert_eq!(applied(&app), Some("ABC-123"), "the focus stays");
+    assert_eq!(
+        app.focused_row().map(|row| row.id.as_str()),
+        Some("workspace")
+    );
+}
+
+/// With a focus set, a click on the workspace PR total still opens the
+/// PRs tab: the chip hit-test does not take it.
+#[test]
+fn a_click_on_the_pr_total_beside_the_chip_still_opens_the_prs_tab() {
+    let mut app = crate::tui::state::prs_fixtures::workspace(false);
+    app.set_focus_query("ABC-123");
+    paint(&mut app, 200);
+    let chip = app.layout.focus_chip_hit.expect("the chip painted");
+    let total = app.layout.pr_total_hit.expect("the PR total painted");
+    assert!(!chip.intersects(total), "{chip:?} {total:?}");
+    app.dispatch(Action::Click {
+        col: total.x + 1,
+        row: total.y,
+    });
+    assert!(app.is_prs_tab());
+    assert_eq!(applied(&app), Some("ABC-123"), "the focus stays");
 }
