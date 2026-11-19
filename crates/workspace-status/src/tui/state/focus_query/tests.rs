@@ -4,6 +4,7 @@ use super::*;
 use crate::settings::Settings;
 use crate::snapshot::build_workspace_snapshot;
 use crate::testutil::{app_state, focus_workspace_repos, unique_dir};
+use crate::tui::ops::FocusScope;
 use crate::tui::status::StatusKind;
 
 /// App state over the focus demo workspace.
@@ -370,5 +371,151 @@ fn the_chip_outlasts_the_summary_on_a_narrow_tree() {
     assert!(
         chip_alone,
         "some width keeps the chip and drops the summary"
+    );
+}
+
+/// The focus demo workspace with every checkout behind its upstream and
+/// off its default branch, so pull and the default switch have targets.
+fn behind_state() -> AppState {
+    use crate::snapshot::SyncStatus;
+    let mut repos = focus_workspace_repos();
+    for repo in &mut repos {
+        repo.sync_status = SyncStatus::Behind;
+        if repo.branch == "main" {
+            repo.branch = format!("topic/{}", repo.repo.replace('/', "-"));
+        }
+    }
+    app_state(&repos)
+}
+
+#[test]
+fn workspace_fetch_under_a_focus_targets_focused_primaries() {
+    let mut app = state();
+    app.set_focus_query("ABC-123");
+    put_cursor(&mut app, "workspace");
+    let effect = app.dispatch(crate::tui::action::Action::Fetch);
+    assert_eq!(
+        effect,
+        Effect::Fetch {
+            repos: vec!["app".into(), "services/api".into()],
+        },
+        "app fetches for its linked abc-123; lib and notes are outside"
+    );
+    assert_eq!(app.status, "Fetching 0/2 focused…");
+    assert_eq!(
+        app.op_focus_scope(),
+        Some(FocusScope { outside: 2 }),
+        "the status text names 2 outside families"
+    );
+}
+
+#[test]
+fn workspace_ops_with_no_focus_keep_todays_targets_and_text() {
+    let mut app = state();
+    put_cursor(&mut app, "workspace");
+    let effect = app.dispatch(crate::tui::action::Action::Fetch);
+    assert_eq!(
+        effect,
+        Effect::Fetch {
+            repos: vec![
+                "app".into(),
+                "lib".into(),
+                "notes".into(),
+                "services/api".into(),
+            ],
+        }
+    );
+    assert_eq!(app.status, "Fetching 0/4…");
+    assert_eq!(app.op_focus_scope(), None);
+}
+
+#[test]
+fn workspace_pull_under_a_feature_focus_skips_a_linked_only_family() {
+    let mut app = behind_state();
+    app.set_focus_query("ABC-123");
+    put_cursor(&mut app, "workspace");
+    let effect = app.dispatch(crate::tui::action::Action::Pull);
+    assert_eq!(
+        effect,
+        Effect::Pull {
+            repos: vec!["services/api".into()],
+        },
+        "app is kept only through a linked worktree: pull skips it"
+    );
+    assert_eq!(app.status, "Pulling 0/1 focused…");
+}
+
+#[test]
+fn workspace_default_switch_under_a_focus_asks_for_the_kept_primaries() {
+    let mut app = behind_state();
+    app.set_focus_query("app, lib");
+    put_cursor(&mut app, "workspace");
+    app.dispatch(crate::tui::action::Action::DefaultBranch);
+    match &app.confirm {
+        Some(super::super::PendingConfirm::SwitchToDefault { repos }) => {
+            assert_eq!(repos, &["app", "lib"]);
+        }
+        other => panic!("expected the switch confirm, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_focus_with_no_target_for_the_op_says_so() {
+    let mut app = behind_state();
+    // Only the linked `login` checkout is kept: no primary to pull.
+    app.set_focus_query("login");
+    put_cursor(&mut app, "workspace");
+    let effect = app.dispatch(crate::tui::action::Action::Pull);
+    assert_eq!(effect, Effect::None);
+    assert_eq!(app.status, "no focused repos for that op");
+    assert_eq!(app.status.kind(), StatusKind::Warn);
+}
+
+#[test]
+fn a_row_op_under_a_focus_keeps_todays_targets_and_text() {
+    let mut app = state();
+    app.set_focus_query("ABC-123");
+    app.folds.remove(OUTSIDE_FOCUS_GROUP_ID);
+    app.rebuild_rows();
+    put_cursor(&mut app, "repo:lib");
+    let effect = app.dispatch(crate::tui::action::Action::Fetch);
+    assert_eq!(
+        effect,
+        Effect::Fetch {
+            repos: vec!["lib".into()],
+        },
+        "an outside repo row still fetches itself"
+    );
+    assert_eq!(app.status, "Fetching 0/1…");
+    assert_eq!(app.op_focus_scope(), None);
+}
+
+#[test]
+fn quick_open_workspace_scope_lists_only_kept_checkouts() {
+    use crate::tui::quick_open::QuickOpenScope;
+    let mut app = state();
+    let checkouts = |app: &AppState| -> Vec<String> {
+        app.quick_open_roots(&QuickOpenScope::Workspace)
+            .into_iter()
+            .map(|root| root.checkout)
+            .collect()
+    };
+    assert_eq!(
+        checkouts(&app),
+        ["app", "lib", "notes", "services/api"],
+        "no focus: every visible primary"
+    );
+    app.set_focus_query("ABC-123");
+    assert_eq!(
+        checkouts(&app),
+        ["app/.worktrees/abc-123", "services/api"],
+        "app's primary is not kept: its kept linked checkout lists its files; \
+         outside families do not"
+    );
+    app.set_focus_query("app");
+    assert_eq!(
+        checkouts(&app),
+        ["app"],
+        "a repo focus keeps the whole family but lists only its primary"
     );
 }

@@ -976,21 +976,28 @@ fn scope_action_visible(
         HintActionId::Revert => collect_write_files(&state.snapshot, focused, state.show_hidden)
             .iter()
             .any(|file| file.change.unstaged_status.is_some() || file.change.untracked),
-        HintActionId::Pull => op_targets(&state.snapshot, focused, state.show_hidden, Op::Pull)
-            .into_iter()
-            .any(|repo| {
-                state
-                    .snapshot
-                    .repos
-                    .iter()
-                    .any(|row| row.repo == repo && row.sync_status == SyncStatus::Behind)
-            }),
+        HintActionId::Pull => op_targets(
+            &state.snapshot,
+            focused,
+            state.show_hidden,
+            Op::Pull,
+            state.op_focus_split(focused).as_ref(),
+        )
+        .into_iter()
+        .any(|repo| {
+            state
+                .snapshot
+                .repos
+                .iter()
+                .any(|row| row.repo == repo && row.sync_status == SyncStatus::Behind)
+        }),
         HintActionId::Push => !push_targets(&state.snapshot, focused, state.show_hidden).is_empty(),
         HintActionId::DefaultBranch => op_targets(
             &state.snapshot,
             focused,
             state.show_hidden,
             Op::DefaultBranch,
+            state.op_focus_split(focused).as_ref(),
         )
         .into_iter()
         .any(|repo| {
@@ -2579,7 +2586,7 @@ mod tests {
             tally.note(repo, RepoOpResult::Ok);
         }
         tally.note("app", RepoOpResult::Failed("timeout".into()));
-        app.status = StatusMessage::error(format_completed_op(RunningOp::Fetch, &tally));
+        app.status = StatusMessage::error(format_completed_op(RunningOp::Fetch, &tally, None));
         let crumb = line_plain(&breadcrumb_line(&app, 80));
         assert!(
             crumb.contains("Fetched 4 repos (1 failed: app — timeout)"),

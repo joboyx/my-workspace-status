@@ -105,8 +105,9 @@ use super::icons::{comment_mark_cols, IconKind};
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
 use super::line_blame::{GraphReveal, LineBlameState};
 use super::ops::{
-    collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
-    push_targets, refresh_target, snapshot_pushable, Op, RevertScope, RunningOp, ScopedFile,
+    collect_write_files, format_running_op, format_running_op_scoped, op_is_kind_noop,
+    op_kind_noop_reason, push_targets, refresh_target, snapshot_pushable, Op, RevertScope,
+    RunningOp, ScopedFile,
 };
 use super::outage::{OutageSource, Outages};
 use super::popover::{IconTarget, PopoverState};
@@ -3133,15 +3134,24 @@ impl AppState {
             self.status = StatusMessage::warn(op_kind_noop_reason(op));
             return Effect::None;
         }
-        let targets = op_targets(&self.snapshot, self.focused_row(), self.show_hidden, op);
+        let targets = self.focused_op_targets(op);
+        let scope = self.op_focus_scope();
         if targets.is_empty() {
-            self.status = StatusMessage::warn("no visible repos for that op");
+            self.status = StatusMessage::warn(if scope.is_some() {
+                "no focused repos for that op"
+            } else {
+                "no visible repos for that op"
+            });
             return Effect::None;
         }
         match op {
             Op::Fetch => {
-                self.status =
-                    StatusMessage::progress(format_running_op(RunningOp::Fetch, 0, targets.len()));
+                self.status = StatusMessage::progress(format_running_op_scoped(
+                    RunningOp::Fetch,
+                    0,
+                    targets.len(),
+                    scope,
+                ));
                 Effect::Fetch { repos: targets }
             }
             Op::Pull => {
@@ -3162,10 +3172,11 @@ impl AppState {
                 if behind.is_empty() {
                     self.pull_nothing_behind(&diverged)
                 } else {
-                    self.status = StatusMessage::progress(format_running_op(
+                    self.status = StatusMessage::progress(format_running_op_scoped(
                         RunningOp::Pull,
                         0,
                         behind.len(),
+                        scope,
                     ));
                     Effect::Pull { repos: behind }
                 }
@@ -3192,10 +3203,11 @@ impl AppState {
                     self.confirm = Some(PendingConfirm::SwitchToDefault { repos });
                     Effect::None
                 } else {
-                    self.status = StatusMessage::progress(format_running_op(
+                    self.status = StatusMessage::progress(format_running_op_scoped(
                         RunningOp::DefaultBranch,
                         0,
                         repos.len(),
+                        scope,
                     ));
                     Effect::DefaultBranch { repos }
                 }
@@ -5653,10 +5665,11 @@ impl AppState {
                 Effect::MergeIntoHead { repo, rev, label }
             }
             Some(PendingConfirm::SwitchToDefault { repos }) => {
-                self.status = StatusMessage::progress(format_running_op(
+                self.status = StatusMessage::progress(format_running_op_scoped(
                     RunningOp::DefaultBranch,
                     0,
                     repos.len(),
+                    self.op_focus_scope(),
                 ));
                 Effect::DefaultBranch { repos }
             }

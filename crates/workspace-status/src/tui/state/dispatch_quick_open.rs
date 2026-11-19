@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use crate::file_index::{FileHit, FileIndex, IndexRoot};
-use crate::snapshot::CheckoutKind;
+use crate::snapshot::{CheckoutKind, WorkspaceRepoSnapshot};
 
 use super::super::action::{Action, Effect, QuickOpenEntry};
 use super::super::command_palette::CommandPaletteState;
@@ -70,18 +70,35 @@ impl AppState {
     ///
     /// Workspace: every primary checkout of the visible snapshot, each
     /// prefixed with its snapshot `repo` path plus `/` (unique per checkout,
-    /// unlike the leaf). One checkout: that checkout, no prefix.
+    /// unlike the leaf). While a focus query is set: the primary checkouts
+    /// the focus keeps, plus the kept linked checkouts of a family whose
+    /// primary the focus leaves out (a feature that lives only in a linked
+    /// worktree still lists its files); no outside family. A repo focus
+    /// keeps the primaries-only scope. One checkout: that checkout, no
+    /// prefix.
     pub(crate) fn quick_open_roots(&self, scope: &QuickOpenScope) -> Vec<IndexRoot> {
         match scope {
-            QuickOpenScope::Workspace => visible_snapshot(&self.snapshot, self.show_hidden)
-                .repos
-                .into_iter()
-                .filter(|repo| repo.checkout_kind == CheckoutKind::Primary)
-                .map(|repo| IndexRoot {
-                    prefix: format!("{}/", repo.repo),
-                    checkout: repo.repo,
-                })
-                .collect(),
+            QuickOpenScope::Workspace => {
+                let split = self.focus_split();
+                let primary =
+                    |repo: &WorkspaceRepoSnapshot| repo.checkout_kind == CheckoutKind::Primary;
+                let in_scope = |repo: &WorkspaceRepoSnapshot| match &split {
+                    Some(split) => split.focused.iter().any(|family| {
+                        family.keeps(&repo.repo)
+                            && (primary(repo) || !family.keeps(&family.primary_path))
+                    }),
+                    None => primary(repo),
+                };
+                visible_snapshot(&self.snapshot, self.show_hidden)
+                    .repos
+                    .into_iter()
+                    .filter(in_scope)
+                    .map(|repo| IndexRoot {
+                        prefix: format!("{}/", repo.repo),
+                        checkout: repo.repo,
+                    })
+                    .collect()
+            }
             QuickOpenScope::Checkout(path) => vec![IndexRoot {
                 checkout: path.clone(),
                 prefix: String::new(),

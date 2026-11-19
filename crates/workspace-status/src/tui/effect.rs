@@ -71,8 +71,8 @@ use super::graph_load::{
 use super::latest_only::LatestOnly;
 use super::line_blame::BlameKey;
 use super::ops::{
-    format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, OpTally,
-    RepoOpResult, RunningOp,
+    format_completed_op, format_mixed_running_op, format_running_op_scoped, FocusScope, Op,
+    OpTally, RepoOpResult, RunningOp,
 };
 use super::pr_groups::{PrGroup, TitleCache};
 use super::pull_request::{is_web_url, lookup, lookup_detail, PrDetailLookup, PrLookup, PrPage};
@@ -618,6 +618,11 @@ struct KindWave {
     /// The background fetch tick started or joined this wave. Its end
     /// starts or ends the scheduled-fetch outage.
     scheduled: bool,
+    /// The focus scope of the workspace-row key that started this wave
+    /// under a focus query: its status text names the focused set. A wave
+    /// that another start joins (a row key, another scope, the background
+    /// tick) drops it, so the text never claims a set it did not run.
+    focus: Option<FocusScope>,
 }
 
 impl KindWave {
@@ -627,11 +632,17 @@ impl KindWave {
             repos: Vec::new(),
             foreground: false,
             scheduled: false,
+            focus: None,
         }
     }
 
     fn done(&self) -> usize {
         self.tally.done()
+    }
+
+    /// True before any start: no repo queued or done, no origin flag.
+    fn is_idle(&self) -> bool {
+        self.done() == 0 && self.repos.is_empty() && !self.foreground && !self.scheduled
     }
 
     fn note_repo(&mut self, checkout: &str) {
@@ -684,9 +695,14 @@ impl RemoteQueue {
 }
 
 /// Final status of a finished bulk op: error when a repo failed, warn when
-/// one was skipped, else ok.
-fn completed_op_status(kind: RunningOp, tally: &OpTally) -> StatusMessage {
-    let text = format_completed_op(kind, tally);
+/// one was skipped, else ok. `scope` names the focused set
+/// ([`format_completed_op`]).
+fn completed_op_status(
+    kind: RunningOp,
+    tally: &OpTally,
+    scope: Option<FocusScope>,
+) -> StatusMessage {
+    let text = format_completed_op(kind, tally, scope);
     if tally.has_failure() {
         StatusMessage::error(text)
     } else if tally.has_skip() {
@@ -1004,6 +1020,9 @@ pub(crate) struct Interpreter {
     default_tally: OpTally,
     default_total: usize,
     default_repos: Vec<String>,
+    /// The focus scope of the running default-branch batch
+    /// ([`AppState::op_focus_scope`] when it started).
+    default_scope: Option<FocusScope>,
     pending_edit: Option<(String, String, Option<u32>)>,
     pending_diff: Option<(String, String, ExternalDiffKind)>,
     diff_prepare: Option<DiffPrepareJob>,
@@ -1154,6 +1173,7 @@ impl Interpreter {
             default_tally: OpTally::default(),
             default_total: 0,
             default_repos: Vec::new(),
+            default_scope: None,
             pending_edit: None,
             pending_diff: None,
             diff_prepare: None,
@@ -1447,10 +1467,12 @@ impl Interpreter {
                 self.default_total = repos.len();
                 self.default_tally = OpTally::default();
                 self.default_repos = repos.clone();
-                state.status = StatusMessage::progress(format_running_op(
+                self.default_scope = state.op_focus_scope();
+                state.status = StatusMessage::progress(format_running_op_scoped(
                     RunningOp::DefaultBranch,
                     0,
                     repos.len(),
+                    self.default_scope,
                 ));
                 self.mark();
                 self.occupy_default_branch(state, &repos);
@@ -3030,10 +3052,11 @@ impl Interpreter {
         self.sched.note_user_done(UserTag::DefaultBranch);
         self.default_tally.note(repo, result);
         let done = self.default_tally.done();
-        state.status = StatusMessage::progress(format_running_op(
+        state.status = StatusMessage::progress(format_running_op_scoped(
             RunningOp::DefaultBranch,
             done,
             self.default_total,
+            self.default_scope,
         ));
         if !self.default_queue.is_empty() {
             self.sched.enqueue_user(UserTag::DefaultBranch);
@@ -3042,6 +3065,7 @@ impl Interpreter {
             state.status = completed_op_status(
                 RunningOp::DefaultBranch,
                 &std::mem::take(&mut self.default_tally),
+                self.default_scope.take(),
             );
             self.default_repos.clear();
             self.release_default_branch(state);
@@ -3375,12 +3399,7 @@ impl Interpreter {
     /// drill) must not follow. Diverged targets stay out: `p` never pulls
     /// them.
     fn enqueue_pull_after_inflight_fetch(&mut self, state: &mut AppState) {
-        let targets = op_targets(
-            &state.snapshot,
-            state.focused_row(),
-            state.show_hidden,
-            Op::Pull,
-        );
+        let targets = state.focused_op_targets(Op::Pull);
         let follow: Vec<String> = targets
             .into_iter()
             .filter(|checkout| {
@@ -3409,6 +3428,14 @@ impl Interpreter {
         if repos.is_empty() {
             return;
         }
+        // A key on the workspace row under a focus query names the focused
+        // set; only a wave it starts alone keeps that scope.
+        let scope = if foreground {
+            state.op_focus_scope()
+        } else {
+            None
+        };
+        let fresh = self.remote.wave(kind).is_some_and(KindWave::is_idle);
         let mut flushed = false;
         for checkout in repos {
             flushed |= self.enqueue_remote_job(state, kind, checkout);
@@ -3418,6 +3445,11 @@ impl Interpreter {
         // flag set here would leak into the next wave a key starts.
         if self.kind_live(kind) {
             if let Some(wave) = self.remote.wave_mut(kind) {
+                wave.focus = if fresh || wave.focus == scope {
+                    scope
+                } else {
+                    None
+                };
                 if foreground {
                     wave.foreground = true;
                 } else {
@@ -3550,11 +3582,13 @@ impl Interpreter {
             // next wave.
             wave.foreground = false;
             wave.scheduled = false;
+            wave.focus = None;
             return false;
         }
         let repos = std::mem::take(&mut wave.repos);
         let tally = std::mem::take(&mut wave.tally);
         let foreground = wave.foreground;
+        let scope = wave.focus;
         // A claim is only held for a wave the tick joined.
         let scheduled = wave.scheduled || claim.is_some();
         *wave = KindWave::empty();
@@ -3568,7 +3602,7 @@ impl Interpreter {
         // the scheduled-fetch outage below. A key that joined its wave
         // still gets the result line.
         if foreground {
-            state.status = completed_op_status(kind, &tally);
+            state.status = completed_op_status(kind, &tally, scope);
         }
         // A failed record write has no recovery; the claim is released.
         let generation = claim.and_then(|claim| claim.finish(tally.has_failure()).ok());
@@ -3608,6 +3642,12 @@ impl Interpreter {
         for _ in have..need {
             self.sched.enqueue_user(UserTag::BulkRemote);
         }
+    }
+
+    /// The focus scope of the running `kind` wave, if a focused
+    /// workspace-row key started it alone.
+    fn wave_scope(&self, kind: RunningOp) -> Option<FocusScope> {
+        self.remote.wave(kind).and_then(|wave| wave.focus)
     }
 
     fn paint_remote_running(&self, state: &mut AppState) {
@@ -3664,14 +3704,18 @@ impl Interpreter {
             state.status = StatusMessage::progress(if other_queued > 0 {
                 format_mixed_running_op(&[], other_queued, Some((run, done, total)))
             } else {
-                format_running_op(run, done, total)
+                format_running_op_scoped(run, done, total, self.wave_scope(run))
             });
             return;
         }
         if progress.len() == 1 {
             let (kind, done, inflight, pending) = progress[0];
-            state.status =
-                StatusMessage::progress(format_running_op(kind, done, done + inflight + pending));
+            state.status = StatusMessage::progress(format_running_op_scoped(
+                kind,
+                done,
+                done + inflight + pending,
+                self.wave_scope(kind),
+            ));
             return;
         }
         let (kind, done, inflight, pending) = progress[0];

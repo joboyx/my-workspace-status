@@ -3211,6 +3211,121 @@ fn finish_fetches(
     }
 }
 
+/// The focus demo workspace focused on `ABC-123` (`app` and
+/// `services/api` in focus, `lib` and `notes` outside), cursor on `row`.
+fn focused_state(row: &str) -> AppState {
+    let mut state = app_state(&crate::testutil::focus_workspace_repos());
+    state.set_focus_query("ABC-123");
+    state.folds.remove(crate::tui::tree::OUTSIDE_FOCUS_GROUP_ID);
+    state.rebuild_rows();
+    state.cursor = state
+        .rows
+        .iter()
+        .position(|r| r.id == row)
+        .unwrap_or_else(|| panic!("missing row {row}"));
+    state
+}
+
+#[test]
+fn a_focused_workspace_fetch_names_the_focused_set_and_the_skipped_count() {
+    let mut state = focused_state("workspace");
+    let mut interp = Interpreter::with_cap(4);
+    let effect = state.dispatch(Action::Fetch);
+    schedule_effect(&mut interp, &mut state, effect, &Action::Fetch);
+    assert_eq!(state.status, "Fetching 0/2 focused…");
+    let jobs = capture_jobs(&mut interp, &mut state);
+    assert_eq!(jobs.len(), 2);
+    finish_fetches(&mut interp, &mut state, jobs, None);
+    assert_eq!(
+        state.status,
+        "Fetched 2 focused repos · 2 outside focus skipped"
+    );
+}
+
+#[test]
+fn a_focused_workspace_fetch_keeps_the_failure_note_after_the_count() {
+    let mut state = focused_state("workspace");
+    let mut interp = Interpreter::with_cap(1);
+    let effect = state.dispatch(Action::Fetch);
+    schedule_effect(&mut interp, &mut state, effect, &Action::Fetch);
+    for _ in 0..2 {
+        let jobs = capture_jobs(&mut interp, &mut state);
+        finish_fetches(&mut interp, &mut state, jobs, Some("app"));
+    }
+    assert_eq!(
+        state.status,
+        "Fetched 2 focused repos (1 failed: app — could not read from remote repository) \
+         · 2 outside focus skipped"
+    );
+    assert_eq!(state.status.kind(), StatusKind::Error);
+}
+
+#[test]
+fn a_row_fetch_under_a_focus_keeps_todays_text() {
+    let mut state = focused_state("repo:lib");
+    let mut interp = Interpreter::with_cap(4);
+    let effect = state.dispatch(Action::Fetch);
+    schedule_effect(&mut interp, &mut state, effect, &Action::Fetch);
+    assert_eq!(state.status, "Fetching 0/1…");
+    let jobs = capture_jobs(&mut interp, &mut state);
+    finish_fetches(&mut interp, &mut state, jobs, None);
+    assert_eq!(state.status, "Fetched 1 repo");
+}
+
+#[test]
+fn a_row_fetch_that_joins_a_focused_wave_drops_the_focused_text() {
+    let mut state = focused_state("workspace");
+    let mut interp = Interpreter::with_cap(1);
+    let effect = state.dispatch(Action::Fetch);
+    schedule_effect(&mut interp, &mut state, effect, &Action::Fetch);
+    // `lib` is outside the focus: a wave that fetched it is not the
+    // focused set.
+    state.cursor = state
+        .rows
+        .iter()
+        .position(|r| r.id == "repo:lib")
+        .expect("lib row");
+    let effect = state.dispatch(Action::Fetch);
+    schedule_effect(&mut interp, &mut state, effect, &Action::Fetch);
+    for _ in 0..3 {
+        let jobs = capture_jobs(&mut interp, &mut state);
+        finish_fetches(&mut interp, &mut state, jobs, None);
+    }
+    assert_eq!(state.status, "Fetched 3 repos");
+}
+
+#[test]
+fn a_focused_workspace_default_switch_names_the_focused_set() {
+    let mut state = focused_state("workspace");
+    let mut interp = Interpreter::with_cap(4);
+    // `services/api` is the one kept primary off its default branch: it
+    // switches at once, with no confirm.
+    let effect = state.dispatch(Action::DefaultBranch);
+    assert_eq!(
+        effect,
+        Effect::DefaultBranch {
+            repos: vec!["services/api".into()],
+        }
+    );
+    schedule_effect(&mut interp, &mut state, effect, &Action::DefaultBranch);
+    assert_eq!(state.status, "Switching 0/1 focused…");
+    let jobs = capture_jobs(&mut interp, &mut state);
+    assert_eq!(jobs.len(), 1);
+    apply_id(
+        &mut interp,
+        &mut state,
+        jobs[0].0,
+        JobOutcome::DefaultBranch {
+            repo: "services/api".into(),
+            result: RepoOpResult::Ok,
+        },
+    );
+    assert_eq!(
+        state.status,
+        "Switched 1 focused repo · 2 outside focus skipped"
+    );
+}
+
 #[test]
 fn background_fetch_tick_skips_while_another_instance_holds_the_claim() {
     let mut state = fixture_state();

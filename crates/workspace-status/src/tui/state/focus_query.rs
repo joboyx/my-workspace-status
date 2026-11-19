@@ -6,12 +6,17 @@
 //! tree through [`AppState::visible_tree`], which applies the positional
 //! filter and hidden repos first and the focus last (R11).
 //!
+//! Workspace-row fetch, pull, default-branch switch, and the workspace
+//! Quick Open read the applied split ([`AppState::focus_split`]) and cover
+//! the focused set only; ops on one repo or checkout row do not change.
+//!
 //! "Focus query" names the filter; "tree focus" in this crate means
 //! keyboard focus on the tree pane ([`super::FocusPane`]).
 
 use super::super::action::Effect;
+use super::super::ops::{op_covers_workspace, op_focus_scope, op_targets, FocusScope, Op};
 use super::super::status::StatusMessage;
-use super::super::tree::{find_node, flatten_with, TreeNode, OUTSIDE_FOCUS_GROUP_ID};
+use super::super::tree::{find_node, flatten_with, TreeNode, VisibleRow, OUTSIDE_FOCUS_GROUP_ID};
 use super::super::tree_focus::{split_by_focus, FocusSplit, TreeFocus};
 use super::super::ui_state_store::{load_tree_focus, save_tree_focus};
 use super::super::viewed::workspace_store_id;
@@ -42,13 +47,6 @@ struct RowAnchor {
 }
 
 /// The focus split that the workspace-row actions read.
-// The caller lands with the workspace-row actions (Task 4) of MYWS-099;
-// `expect` fails the build once it calls it, so this attribute cannot
-// outlive it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the caller lands in MYWS-099 Task 4")
-)]
 impl AppState {
     /// The visible snapshot split by the applied focus query: focused
     /// families with their kept checkouts, outside families, and the
@@ -57,6 +55,34 @@ impl AppState {
         let focus = self.focus_query.as_ref()?;
         let visible = visible_snapshot(&self.snapshot, self.show_hidden);
         Some(split_by_focus(focus, &visible))
+    }
+
+    /// The focus split a fetch, pull, or default-branch switch on `row`
+    /// reads ([`op_targets`]): [`Self::focus_split`] for a workspace-wide
+    /// op ([`op_covers_workspace`]), else `None`, so a row op never builds
+    /// the split.
+    pub(crate) fn op_focus_split(&self, row: Option<&VisibleRow>) -> Option<FocusSplit> {
+        if op_covers_workspace(row) {
+            self.focus_split()
+        } else {
+            None
+        }
+    }
+
+    /// Targets of `op` on the cursor row ([`op_targets`]), narrowed to
+    /// the focused set on the workspace row while a focus is set.
+    pub(crate) fn focused_op_targets(&self, op: Op) -> Vec<String> {
+        let row = self.focused_row();
+        let split = self.op_focus_split(row);
+        op_targets(&self.snapshot, row, self.show_hidden, op, split.as_ref())
+    }
+
+    /// The focus scope of a fetch, pull, or default-branch switch on the
+    /// cursor row ([`op_focus_scope`]): `Some` on the workspace row while
+    /// a focus is set, so the status text names the focused set.
+    pub(crate) fn op_focus_scope(&self) -> Option<FocusScope> {
+        let row = self.focused_row();
+        op_focus_scope(row, self.op_focus_split(row).as_ref())
     }
 }
 
