@@ -67,6 +67,7 @@ mod term_restore;
 pub(crate) mod theme;
 mod toast;
 mod tree;
+pub mod tree_focus;
 pub(crate) mod tty;
 pub(crate) mod ui_state_store;
 pub(crate) mod undercurl;
@@ -77,6 +78,8 @@ mod word_diff;
 pub(crate) use app::discover_config;
 pub use app::{collect_full_snapshot, run_tui, TuiOpts};
 pub use keys::InputMode;
+/// Per-workspace tree focus persistence, next to [`tree_focus`].
+pub use ui_state_store::{load_tree_focus, save_tree_focus};
 
 /// Mouse capture when the TUI starts: on, until `m` turns it off. The
 /// `ws doctor` CLI reports its Mouse row with this start state.
