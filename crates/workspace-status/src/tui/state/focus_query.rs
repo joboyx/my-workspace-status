@@ -4,7 +4,7 @@
 //! root in the UI-state store; the focus prompt's draft previews the tree
 //! live ([`AppState::preview_focus_query`]) without a save. Both rebuild the
 //! tree through [`AppState::visible_tree`], which applies the positional
-//! filter and hidden repos first and the focus last (R11).
+//! filter and hidden repos first and the focus last.
 //!
 //! Workspace-row fetch, pull, default-branch switch, and the workspace
 //! Quick Open read the applied split ([`AppState::focus_split`]) and cover

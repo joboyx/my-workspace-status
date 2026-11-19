@@ -8,7 +8,9 @@ use super::*;
 use crate::snapshot::{
     build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
 };
-use crate::testutil::{app_state, app_state_of, init_repo, repo, repo_snapshot, unstaged_change};
+use crate::testutil::{
+    app_state, app_state_of, init_repo, put_cursor, repo, repo_snapshot, unstaged_change,
+};
 use crate::tui::split::{
     diff_split_fraction_from_left_width, diff_split_row_width, diff_split_rule_x,
     launch_tree_width, pane_widths, side_by_side_column_widths, DIFF_PAD_X, DIFF_SPLIT_FRACTION,
@@ -6129,15 +6131,6 @@ fn dual_ms_repo(name: &str) -> RepoSnapshot {
     }
 }
 
-fn focus_row_id(app: &mut AppState, id: &str) {
-    let idx = app
-        .rows
-        .iter()
-        .position(|r| r.id == id)
-        .unwrap_or_else(|| panic!("missing row {id}"));
-    app.cursor = idx;
-}
-
 #[test]
 fn toggle_reviewed_on_dual_ms_rows_survives_reconcile() {
     use std::fs;
@@ -6149,7 +6142,7 @@ fn toggle_reviewed_on_dual_ms_rows_survives_reconcile() {
     let snapshot = build_workspace_snapshot(&[dual_ms_repo("app")], &[], false, &[]);
     let mut app = AppState::new(workspace, snapshot, true);
 
-    focus_row_id(&mut app, "file:app:both.rs");
+    put_cursor(&mut app, "file:app:both.rs");
     let staged = app.focused_row().unwrap().file.clone().unwrap();
     assert_eq!(staged.staged_status.as_deref(), Some("M"));
     assert_eq!(staged.unstaged_status, None);
@@ -6168,7 +6161,7 @@ fn toggle_reviewed_on_dual_ms_rows_survives_reconcile() {
     app.reconcile_viewed_store();
     assert!(app.reviewed.is_empty());
 
-    focus_row_id(&mut app, "file:app:both.rs#unstaged");
+    put_cursor(&mut app, "file:app:both.rs#unstaged");
     let unstaged = app.focused_row().unwrap().file.clone().unwrap();
     assert_eq!(unstaged.staged_status, None);
     assert_eq!(unstaged.unstaged_status.as_deref(), Some("M"));

@@ -11,7 +11,9 @@
 //! builds a [`RepoSnapshot`] row from scratch: tests set only the fields they
 //! care about, so a new field means one edit here, not one per test module.
 //! The app-state fixtures ([`app_state`], [`app_state_ascii`],
-//! [`app_state_of`]) build an [`AppState`] over those rows.
+//! [`app_state_of`], [`focus_state`]) build an [`AppState`] over those
+//! rows; [`put_cursor`], [`row_ids`], [`saved_focus`], and [`paint`] read
+//! or drive one.
 //!
 //! [`panic_hook_lock`] serializes the tests that touch the process-wide
 //! panic hook or let a worker job panic.
@@ -170,6 +172,44 @@ pub fn app_state_ascii(repos: &[RepoSnapshot], ascii: bool) -> AppState {
 /// filters): cwd `/tmp`, ASCII glyphs.
 pub fn app_state_of(snapshot: WorkspaceSnapshot) -> AppState {
     AppState::new(PathBuf::from("/tmp"), snapshot, true)
+}
+
+/// Test [`AppState`] over the focus demo workspace
+/// ([`focus_workspace_repos`]).
+pub fn focus_state() -> AppState {
+    app_state(&focus_workspace_repos())
+}
+
+/// Put the cursor of `app` on the tree row `id`. Panics with the row ids
+/// when no row has that id.
+pub fn put_cursor(app: &mut AppState, id: &str) {
+    app.cursor = app
+        .rows
+        .iter()
+        .position(|row| row.id == id)
+        .unwrap_or_else(|| panic!("missing row {id}: {:?}", row_ids(app)));
+}
+
+/// Ids of the visible tree rows of `app`, top to bottom.
+pub fn row_ids(app: &AppState) -> Vec<&str> {
+    app.rows.iter().map(|row| row.id.as_str()).collect()
+}
+
+/// The focus query the UI-state file of `app` holds for its workspace
+/// root, or `None` with no saved entry.
+pub fn saved_focus(app: &AppState) -> Option<String> {
+    crate::tui::ui_state_store::load_tree_focus(
+        &app.ui_store_path,
+        &crate::tui::workspace_store_id(&app.cwd),
+    )
+}
+
+/// Paint `app` on a `cols` × 30 test terminal; the painted buffer.
+pub fn paint(app: &mut AppState, cols: u16) -> ratatui::buffer::Buffer {
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(cols, 30)).unwrap();
+    terminal.draw(|frame| crate::tui::draw(frame, app)).unwrap();
+    terminal.backend().buffer().clone()
 }
 
 // ---------------------------------------------------------------------------

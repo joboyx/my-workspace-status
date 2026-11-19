@@ -3,40 +3,20 @@ use std::path::PathBuf;
 use super::*;
 use crate::settings::Settings;
 use crate::snapshot::build_workspace_snapshot;
-use crate::testutil::{app_state, focus_workspace_repos, unique_dir};
+use crate::testutil::{
+    app_state, focus_state, focus_workspace_repos, paint, put_cursor, row_ids, saved_focus,
+    unique_dir,
+};
 use crate::tui::ops::FocusScope;
 use crate::tui::status::StatusKind;
-
-/// App state over the focus demo workspace.
-fn state() -> AppState {
-    app_state(&focus_workspace_repos())
-}
-
-/// Put the cursor on row `id`.
-fn put_cursor(app: &mut AppState, id: &str) {
-    app.cursor = app
-        .rows
-        .iter()
-        .position(|row| row.id == id)
-        .unwrap_or_else(|| panic!("missing row {id}"));
-}
 
 fn cursor_id(app: &AppState) -> &str {
     app.focused_row().map_or("", |row| row.id.as_str())
 }
 
-fn row_ids(app: &AppState) -> Vec<&str> {
-    app.rows.iter().map(|row| row.id.as_str()).collect()
-}
-
-/// The query saved for the test state's workspace root.
-fn saved(app: &AppState) -> Option<String> {
-    load_tree_focus(&app.ui_store_path, &workspace_store_id(&app.cwd))
-}
-
 #[test]
 fn set_focus_narrows_the_tree_saves_and_folds_the_outside_group() {
-    let mut app = state();
+    let mut app = focus_state();
     put_cursor(&mut app, "repo:services/api");
     let effect = app.set_focus_query("ABC-123");
     assert!(matches!(effect, Effect::None), "same row: no reload");
@@ -54,14 +34,14 @@ fn set_focus_narrows_the_tree_saves_and_folds_the_outside_group() {
     );
     assert_eq!(cursor_id(&app), "repo:services/api", "the cursor row stays");
     assert_eq!(app.status, "focus: ABC-123");
-    assert_eq!(saved(&app).as_deref(), Some("ABC-123"));
+    assert_eq!(saved_focus(&app).as_deref(), Some("ABC-123"));
     let chip = app.tree.chrome.focus_chip.clone().expect("chip");
     assert_eq!((chip.focused, chip.total), (2, 4));
 }
 
 #[test]
 fn cursor_moves_to_the_nearest_visible_ancestor() {
-    let mut app = state();
+    let mut app = focus_state();
     app.folds.remove("group:no-updates");
     app.rebuild_rows();
     put_cursor(&mut app, "repo:lib");
@@ -69,7 +49,7 @@ fn cursor_moves_to_the_nearest_visible_ancestor() {
     assert_eq!(cursor_id(&app), OUTSIDE_FOCUS_GROUP_ID, "folded group");
     assert!(matches!(effect, Effect::LoadRightPane));
 
-    let mut app = state();
+    let mut app = focus_state();
     put_cursor(&mut app, "checkout:app/.worktrees/login");
     app.set_focus_query("ABC-123");
     assert_eq!(
@@ -81,7 +61,7 @@ fn cursor_moves_to_the_nearest_visible_ancestor() {
 
 #[test]
 fn clear_focus_restores_the_tree_and_drops_the_saved_query() {
-    let mut app = state();
+    let mut app = focus_state();
     let plain = row_ids(&app).join(" ");
     app.set_focus_query("ABC-123");
     put_cursor(&mut app, "repo:services/api");
@@ -91,22 +71,22 @@ fn clear_focus_restores_the_tree_and_drops_the_saved_query() {
     assert!(!app.folds.contains(OUTSIDE_FOCUS_GROUP_ID));
     assert_eq!(cursor_id(&app), "repo:services/api");
     assert_eq!(app.status, "focus cleared");
-    assert_eq!(saved(&app), None);
+    assert_eq!(saved_focus(&app), None);
     assert_eq!(app.tree.chrome.focus_chip, None);
 }
 
 #[test]
 fn a_query_with_no_terms_clears() {
-    let mut app = state();
+    let mut app = focus_state();
     app.set_focus_query("lib");
     app.set_focus_query(" , ");
     assert_eq!(app.focus_query(), None);
-    assert_eq!(saved(&app), None);
+    assert_eq!(saved_focus(&app), None);
 }
 
 #[test]
 fn an_open_outside_group_stays_open_while_the_focus_changes() {
-    let mut app = state();
+    let mut app = focus_state();
     app.set_focus_query("ABC-123");
     app.folds.remove(OUTSIDE_FOCUS_GROUP_ID);
     app.set_focus_query("abc-123, notes");
@@ -121,13 +101,13 @@ fn an_open_outside_group_stays_open_while_the_focus_changes() {
 
 #[test]
 fn preview_shows_the_draft_without_a_save_and_cancel_restores() {
-    let mut app = state();
+    let mut app = focus_state();
     put_cursor(&mut app, "repo:services/api");
     let before = row_ids(&app).join(" ");
     app.preview_focus_query("lib");
     assert_eq!(app.focus_query(), None, "the applied focus stays");
     assert_eq!(app.shown_focus_query().map(TreeFocus::query), Some("lib"));
-    assert_eq!(saved(&app), None, "a preview never saves");
+    assert_eq!(saved_focus(&app), None, "a preview never saves");
     assert_eq!(cursor_id(&app), OUTSIDE_FOCUS_GROUP_ID);
     assert_eq!(
         app.tree
@@ -154,7 +134,7 @@ fn preview_shows_the_draft_without_a_save_and_cancel_restores() {
 
 #[test]
 fn cancel_restores_the_focus_applied_before_the_preview() {
-    let mut app = state();
+    let mut app = focus_state();
     app.set_focus_query("ABC-123");
     let focused = row_ids(&app).join(" ");
     app.preview_focus_query("lib");
@@ -173,13 +153,13 @@ fn cancel_restores_the_focus_applied_before_the_preview() {
 
 #[test]
 fn applying_a_preview_saves_the_draft_and_ends_the_preview() {
-    let mut app = state();
+    let mut app = focus_state();
     put_cursor(&mut app, "repo:services/api");
     app.preview_focus_query("lib");
     app.set_focus_query("lib");
     assert_eq!(app.focus_query().map(TreeFocus::query), Some("lib"));
     assert!(app.focus_preview.is_none());
-    assert_eq!(saved(&app).as_deref(), Some("lib"));
+    assert_eq!(saved_focus(&app).as_deref(), Some("lib"));
     assert_eq!(
         cursor_id(&app),
         OUTSIDE_FOCUS_GROUP_ID,
@@ -189,7 +169,7 @@ fn applying_a_preview_saves_the_draft_and_ends_the_preview() {
 
 #[test]
 fn a_failed_save_keeps_the_focus_and_shows_the_error() {
-    let mut app = state();
+    let mut app = focus_state();
     let dir = unique_dir("ws-focus-save");
     std::fs::create_dir_all(&dir).unwrap();
     // A directory where the store file should be: the save fails.
@@ -207,7 +187,7 @@ fn a_failed_save_keeps_the_focus_and_shows_the_error() {
 
 #[test]
 fn focus_split_reads_the_applied_focus() {
-    let mut app = state();
+    let mut app = focus_state();
     assert_eq!(app.focus_split(), None);
     app.set_focus_query("ABC-123");
     let split = app.focus_split().expect("split");
@@ -274,7 +254,7 @@ fn launch_with_no_saved_focus_says_nothing() {
 
 #[test]
 fn a_watch_snapshot_keeps_the_focus() {
-    let mut app = state();
+    let mut app = focus_state();
     app.set_focus_query("ABC-123");
     let snapshot = build_workspace_snapshot(&focus_workspace_repos(), &[], false, &[]);
     app.apply_watch_snapshot(snapshot);
@@ -283,16 +263,6 @@ fn a_watch_snapshot_keeps_the_focus() {
         Some(OUTSIDE_FOCUS_GROUP_ID)
     );
     assert!(app.folds.contains(OUTSIDE_FOCUS_GROUP_ID));
-}
-
-/// Paint `app` on a `cols` × 30 frame; the buffer.
-fn paint(app: &mut AppState, cols: u16) -> ratatui::buffer::Buffer {
-    let mut terminal =
-        ratatui::Terminal::new(ratatui::backend::TestBackend::new(cols, 30)).unwrap();
-    terminal
-        .draw(|frame| crate::tui::render::draw(frame, app))
-        .unwrap();
-    terminal.backend().buffer().clone()
 }
 
 /// Text of the cells of `rect` (one row).
@@ -321,7 +291,7 @@ fn find(buf: &ratatui::buffer::Buffer, needle: &str) -> (u16, u16) {
 
 #[test]
 fn paint_records_the_chip_cells_and_highlights_matches() {
-    let mut app = state();
+    let mut app = focus_state();
     app.set_focus_query("ABC-123");
     let buf = paint(&mut app, 160);
     let hit = app.layout.focus_chip_hit.expect("the chip painted");
@@ -349,7 +319,7 @@ fn paint_records_the_chip_cells_and_highlights_matches() {
 /// some width shows the chip with the summary gone.
 #[test]
 fn the_chip_outlasts_the_summary_on_a_narrow_tree() {
-    let mut app = state();
+    let mut app = focus_state();
     app.set_focus_query("ABC-123");
     let mut chip_alone = false;
     for cols in 46..=200 {
@@ -390,7 +360,7 @@ fn behind_state() -> AppState {
 
 #[test]
 fn workspace_fetch_under_a_focus_targets_focused_primaries() {
-    let mut app = state();
+    let mut app = focus_state();
     app.set_focus_query("ABC-123");
     put_cursor(&mut app, "workspace");
     let effect = app.dispatch(crate::tui::action::Action::Fetch);
@@ -411,7 +381,7 @@ fn workspace_fetch_under_a_focus_targets_focused_primaries() {
 
 #[test]
 fn workspace_ops_with_no_focus_keep_todays_targets_and_text() {
-    let mut app = state();
+    let mut app = focus_state();
     put_cursor(&mut app, "workspace");
     let effect = app.dispatch(crate::tui::action::Action::Fetch);
     assert_eq!(
@@ -473,7 +443,7 @@ fn a_focus_with_no_target_for_the_op_says_so() {
 
 #[test]
 fn a_row_op_under_a_focus_keeps_todays_targets_and_text() {
-    let mut app = state();
+    let mut app = focus_state();
     app.set_focus_query("ABC-123");
     app.folds.remove(OUTSIDE_FOCUS_GROUP_ID);
     app.rebuild_rows();
@@ -493,7 +463,7 @@ fn a_row_op_under_a_focus_keeps_todays_targets_and_text() {
 #[test]
 fn quick_open_workspace_scope_lists_only_kept_checkouts() {
     use crate::tui::quick_open::QuickOpenScope;
-    let mut app = state();
+    let mut app = focus_state();
     let checkouts = |app: &AppState| -> Vec<String> {
         app.quick_open_roots(&QuickOpenScope::Workspace)
             .into_iter()

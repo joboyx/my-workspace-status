@@ -32,7 +32,7 @@ fn row<'a>(rows: &'a [VisibleRow], id: &str) -> &'a VisibleRow {
         .unwrap_or_else(|| panic!("no row {id}"))
 }
 
-/// S2: a feature focus keeps one worktree of `app` (`1/3 wt`) and
+/// A feature focus keeps one worktree of `app` (`1/3 wt`) and
 /// `services/api`; `lib` and `notes` fold into the last root child.
 #[test]
 fn feature_focus_puts_outside_families_in_the_last_group() {

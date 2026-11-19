@@ -2719,7 +2719,7 @@ impl AppState {
     }
 
     /// The tree of the visible snapshot (positional filter and hidden repos
-    /// first), narrowed by the shown focus query (R11 order).
+    /// first), narrowed by the shown focus query.
     fn visible_tree(&self) -> TreeNode {
         let visible = visible_snapshot(&self.snapshot, self.show_hidden);
         build_focused_tree(

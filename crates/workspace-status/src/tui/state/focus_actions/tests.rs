@@ -1,42 +1,18 @@
 use super::*;
 use crate::snapshot::{build_workspace_snapshot, RepoSnapshot};
-use crate::testutil::{app_state, focus_workspace_repos, linked_checkout, on_branch, repo};
+use crate::testutil::{
+    app_state, focus_state, focus_workspace_repos, linked_checkout, on_branch, paint, put_cursor,
+    repo, row_ids, saved_focus,
+};
 use crate::tui::command_palette::command_for;
 use crate::tui::keys::InputMode;
 use crate::tui::status::StatusKind;
 use crate::tui::tabs::SWITCH_TO_WORKSPACE_TAB;
 use crate::tui::tree::OUTSIDE_FOCUS_GROUP_ID;
 use crate::tui::tree_focus::TreeFocus;
-use crate::tui::ui_state_store::load_tree_focus;
-use crate::tui::viewed::workspace_store_id;
-
-/// App state over the focus demo workspace: `app` on `main` with linked
-/// `abc-123` (`feature/ABC-123-invoice-export`) and `login`, then
-/// `services/api` (`feature/abc-123-api`), clean `lib`, dirty `notes`.
-fn state() -> AppState {
-    app_state(&focus_workspace_repos())
-}
-
-/// Put the cursor on row `id`.
-fn put_cursor(app: &mut AppState, id: &str) {
-    app.cursor = app
-        .rows
-        .iter()
-        .position(|row| row.id == id)
-        .unwrap_or_else(|| panic!("missing row {id}: {:?}", row_ids(app)));
-}
-
-fn row_ids(app: &AppState) -> Vec<&str> {
-    app.rows.iter().map(|row| row.id.as_str()).collect()
-}
 
 fn applied(app: &AppState) -> Option<&str> {
     app.focus_query().map(TreeFocus::query)
-}
-
-/// The query saved for the test state's workspace root.
-fn saved(app: &AppState) -> Option<String> {
-    load_tree_focus(&app.ui_store_path, &workspace_store_id(&app.cwd))
 }
 
 /// The palette row reason of `action` now.
@@ -47,24 +23,24 @@ fn palette_reason(app: &AppState, action: Action) -> Option<String> {
 
 #[test]
 fn star_focuses_the_row_feature_and_again_clears_it() {
-    let mut app = state();
+    let mut app = focus_state();
     put_cursor(&mut app, "checkout:app/.worktrees/abc-123");
     app.dispatch(Action::FocusThisFeature);
     assert_eq!(applied(&app), Some("ABC-123"));
-    assert_eq!(saved(&app).as_deref(), Some("ABC-123"));
+    assert_eq!(saved_focus(&app).as_deref(), Some("ABC-123"));
     assert_eq!(app.status, "focus: ABC-123");
     // `services/api` is on `feature/abc-123-api`: the same token in
     // another case, so `*` there clears the focus.
     put_cursor(&mut app, "repo:services/api");
     app.dispatch(Action::FocusThisFeature);
     assert_eq!(applied(&app), None, "the toggle ignores case");
-    assert_eq!(saved(&app), None);
+    assert_eq!(saved_focus(&app), None);
     assert_eq!(app.status, "focus cleared");
 }
 
 #[test]
 fn star_replaces_a_different_focus_and_ignores_outer_spaces() {
-    let mut app = state();
+    let mut app = focus_state();
     app.set_focus_query("lib");
     app.folds.remove(OUTSIDE_FOCUS_GROUP_ID);
     app.rebuild_rows();
@@ -152,7 +128,7 @@ fn feature_preset_names_why_it_cannot_run() {
 
 #[test]
 fn repo_preset_focuses_the_family_primary_path() {
-    let mut app = state();
+    let mut app = focus_state();
     put_cursor(&mut app, "workspace");
     assert_eq!(
         palette_reason(&app, Action::FocusThisRepo).as_deref(),
@@ -170,7 +146,7 @@ fn repo_preset_focuses_the_family_primary_path() {
 
 #[test]
 fn clear_row_needs_a_focus() {
-    let mut app = state();
+    let mut app = focus_state();
     assert_eq!(
         palette_reason(&app, Action::FocusClear).as_deref(),
         Some(NO_FOCUS_SET)
@@ -186,7 +162,7 @@ fn clear_row_needs_a_focus() {
 
 #[test]
 fn prompt_previews_each_edit_and_esc_restores_the_applied_focus() {
-    let mut app = state();
+    let mut app = focus_state();
     app.set_focus_query("lib");
     let applied_rows = row_ids(&app).join(" ");
     app.dispatch(Action::FocusPromptOpen);
@@ -205,7 +181,11 @@ fn prompt_previews_each_edit_and_esc_restores_the_applied_focus() {
     );
     assert!(row_ids(&app).contains(&"repo:services/api"), "live preview");
     assert_eq!(applied(&app), Some("lib"), "the applied focus stays");
-    assert_eq!(saved(&app).as_deref(), Some("lib"), "a preview never saves");
+    assert_eq!(
+        saved_focus(&app).as_deref(),
+        Some("lib"),
+        "a preview never saves"
+    );
     app.dispatch(Action::FocusPromptBackspace);
     assert_eq!(
         app.focus_prompt.as_ref().map(|p| p.query.as_str()),
@@ -227,7 +207,7 @@ fn prompt_previews_each_edit_and_esc_restores_the_applied_focus() {
 
 #[test]
 fn prompt_enter_applies_and_an_empty_draft_clears() {
-    let mut app = state();
+    let mut app = focus_state();
     app.dispatch(Action::FocusPromptOpen);
     assert_eq!(
         app.focus_prompt.as_ref().map(|p| p.query.as_str()),
@@ -239,7 +219,7 @@ fn prompt_enter_applies_and_an_empty_draft_clears() {
     app.dispatch(Action::FocusPromptSubmit);
     assert_eq!(app.focus_prompt, None);
     assert_eq!(applied(&app), Some("lib"));
-    assert_eq!(saved(&app).as_deref(), Some("lib"));
+    assert_eq!(saved_focus(&app).as_deref(), Some("lib"));
     assert_eq!(app.status, "focus: lib");
 
     app.dispatch(Action::FocusPromptOpen);
@@ -248,13 +228,13 @@ fn prompt_enter_applies_and_an_empty_draft_clears() {
     }
     app.dispatch(Action::FocusPromptSubmit);
     assert_eq!(applied(&app), None, "an empty draft clears");
-    assert_eq!(saved(&app), None);
+    assert_eq!(saved_focus(&app), None);
     assert_eq!(app.status, "focus cleared");
 }
 
 #[test]
 fn focus_rows_say_switch_to_workspace_on_other_tabs() {
-    let mut app = state();
+    let mut app = focus_state();
     app.open_prs_tab();
     for action in [
         Action::FocusThisFeature,
@@ -296,16 +276,6 @@ fn an_outside_group_that_a_watch_snapshot_brings_starts_folded() {
     assert!(!row_ids(&app).contains(&"repo:lib"));
 }
 
-/// Paint `app` on a `cols` × 30 frame; the buffer.
-fn paint(app: &mut AppState, cols: u16) -> ratatui::buffer::Buffer {
-    let mut terminal =
-        ratatui::Terminal::new(ratatui::backend::TestBackend::new(cols, 30)).unwrap();
-    terminal
-        .draw(|frame| crate::tui::render::draw(frame, app))
-        .unwrap();
-    terminal.backend().buffer().clone()
-}
-
 /// The screen as one string per row.
 fn screen(buf: &ratatui::buffer::Buffer) -> Vec<String> {
     (0..buf.area.height)
@@ -321,7 +291,7 @@ fn screen(buf: &ratatui::buffer::Buffer) -> Vec<String> {
 /// key hint; the tree behind it keeps its colours (no dim backdrop).
 #[test]
 fn prompt_paints_the_draft_and_the_preview_count_over_a_bright_tree() {
-    let mut app = state();
+    let mut app = focus_state();
     let plain = paint(&mut app, 160);
     app.dispatch(Action::FocusPromptOpen);
     let rows = screen(&paint(&mut app, 160));
@@ -354,7 +324,7 @@ fn prompt_paints_the_draft_and_the_preview_count_over_a_bright_tree() {
 /// A click on the chip of the workspace row clears the focus.
 #[test]
 fn a_click_on_the_focus_chip_clears_the_focus() {
-    let mut app = state();
+    let mut app = focus_state();
     app.set_focus_query("ABC-123");
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 30)).unwrap();
     terminal
@@ -366,7 +336,7 @@ fn a_click_on_the_focus_chip_clears_the_focus() {
         row: hit.y,
     });
     assert_eq!(applied(&app), None);
-    assert_eq!(saved(&app), None);
+    assert_eq!(saved_focus(&app), None);
     assert_eq!(app.status, "focus cleared");
 }
 
@@ -374,7 +344,7 @@ fn a_click_on_the_focus_chip_clears_the_focus() {
 /// the workspace row selects that row, and the focus stays.
 #[test]
 fn a_click_left_of_the_focus_chip_selects_the_workspace_row() {
-    let mut app = state();
+    let mut app = focus_state();
     app.set_focus_query("ABC-123");
     put_cursor(&mut app, "repo:services/api");
     paint(&mut app, 160);

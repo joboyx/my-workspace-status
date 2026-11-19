@@ -82,6 +82,9 @@ pub use keys::InputMode;
 /// Mouse capture when the TUI starts: on, until `m` turns it off. The
 /// `ws doctor` CLI reports its Mouse row with this start state.
 pub(crate) const MOUSE_CAPTURE_AT_START: bool = true;
+/// Test-only path for the `crate::testutil` paint fixture; `render` is private.
+#[cfg(test)]
+pub(crate) use render::draw;
 /// Test-only path for `crate::testutil` app-state fixtures; `state` is private.
 #[cfg(test)]
 pub(crate) use state::AppState;

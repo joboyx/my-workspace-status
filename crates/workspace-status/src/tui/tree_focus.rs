@@ -167,7 +167,7 @@ pub fn split_by_focus(focus: &TreeFocus, visible: &WorkspaceSnapshot) -> FocusSp
             .map(|m| m.repo.clone())
             .collect();
         if kept_checkout_paths.is_empty() {
-            if members.iter().any(|m| checkout_is_dirty(m)) {
+            if members.iter().any(|m| m.is_dirty()) {
                 split.counts.outside_dirty += 1;
             }
             split.outside.push(primary_path.to_string());
@@ -183,11 +183,6 @@ pub fn split_by_focus(focus: &TreeFocus, visible: &WorkspaceSnapshot) -> FocusSp
     split.counts.outside = split.outside.len();
     split.counts.total = split.counts.focused + split.counts.outside;
     split
-}
-
-/// True when the checkout has a staged, unstaged, or untracked change.
-fn checkout_is_dirty(repo: &WorkspaceRepoSnapshot) -> bool {
-    repo.has_staged || repo.has_unstaged || repo.has_untracked
 }
 
 /// The "this feature" preset: the ticket-like token of `branch`.
