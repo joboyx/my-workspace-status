@@ -252,8 +252,9 @@ fn workspace_need_you_outlasts_the_pr_count_and_the_change_summary() {
         ..NodeChrome::default()
     };
     let text = |totals: PrTotals, narrow: bool, room: usize| -> String {
-        let (segs, total_cols) = workspace_trailing_fit(&chrome, totals, narrow, room);
-        let text: String = segs.iter().map(|seg| seg.text.as_str()).collect();
+        let fit = workspace_trailing_fit(&chrome, totals, narrow, room, false);
+        let total_cols = fit.pr_total_cols;
+        let text: String = fit.segs.iter().map(|seg| seg.text.as_str()).collect();
         // The total's columns are the text after the gap, or the whole
         // text when the total stands alone.
         let total = [
@@ -316,8 +317,14 @@ fn workspace_need_you_outlasts_the_pr_count_and_the_change_summary() {
         "4 changed  2 need you",
         "a narrow tree shortens the summary beside need you too"
     );
-    let (short, _) =
-        workspace_trailing_fit(&chrome, both, false, visible_width("4 changed  2 need you"));
+    let short = workspace_trailing_fit(
+        &chrome,
+        both,
+        false,
+        visible_width("4 changed  2 need you"),
+        false,
+    )
+    .segs;
     let short: Vec<(&str, SegRole, bool, Option<IconKind>)> = short
         .iter()
         .map(|seg| (seg.text.as_str(), seg.role, seg.bold, seg.icon))
@@ -341,7 +348,7 @@ fn workspace_need_you_outlasts_the_pr_count_and_the_change_summary() {
     assert_eq!(text(one, true, 80), "4 changed · 2 behind  1 needs you");
     assert_eq!(text(PrTotals::default(), false, 80), "4 changed · 2 behind");
 
-    let (segs, _) = workspace_trailing_fit(&chrome, both, false, 80);
+    let segs = workspace_trailing_fit(&chrome, both, false, 80, false).segs;
     let styles: Vec<(&str, SegRole, bool, bool, Option<IconKind>)> = segs
         .iter()
         .map(|seg| (seg.text.as_str(), seg.role, seg.bold, seg.dim, seg.icon))

@@ -15,11 +15,16 @@ use crate::snapshot::{
 
 use super::icons::{
     file_icon, icon_branch, icon_changes, icon_clean, icon_comment, icon_comment_resolved,
-    icon_folder, icon_hidden, icon_linked_worktree, icon_repo, icon_staged, icon_status_failed,
-    icon_viewed, icon_workspace, status_letter_from_change, tui_file_badge, tui_merge_mark,
-    tui_sync_mark, upstream_rewrite_short_text, IconKind, StatusColorRole,
+    icon_focus, icon_folder, icon_hidden, icon_linked_worktree, icon_repo, icon_staged,
+    icon_status_failed, icon_viewed, icon_workspace, status_letter_from_change, tui_file_badge,
+    tui_merge_mark, tui_sync_mark, upstream_rewrite_short_text, IconKind, StatusColorRole,
 };
 use super::pr_status::PrState;
+use super::tree_focus::TreeFocus;
+
+mod focus;
+
+pub use focus::{highlight_focus_matches, OUTSIDE_FOCUS_GROUP_ID};
 
 /// Structural node kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +58,23 @@ pub struct NodeChrome {
     pub default_branch_override: Option<String>,
     /// Family container (primary + linked checkouts).
     pub is_family: bool,
+    /// All checkouts of a family container that a focus query narrowed:
+    /// the `n` of its `k/n wt` mark (`k` is the checkout children). `0`
+    /// when no focus narrowed the family; the mark then reads `k wt`.
+    pub checkout_total: usize,
+    /// Workspace root only: the focus chip while a focus query is set.
+    pub focus_chip: Option<FocusChip>,
+}
+
+/// The focus chip of the workspace row: `◎ <query> · <focused>/<total> repos`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct FocusChip {
+    /// The query as typed, trimmed.
+    pub query: String,
+    /// Families in the focused part of the tree.
+    pub focused: usize,
+    /// All visible families.
+    pub total: usize,
 }
 
 /// One node in the workspace tree.
@@ -103,6 +125,10 @@ pub enum SegRole {
     BranchFeature,
     /// Terminal default foreground: no colour of its own (`NO_COLOR`).
     Plain,
+    /// Text a focus query matches in a repo or branch name: paints in the
+    /// search-match pill (the filter pill's colours, bold), as the
+    /// search-in-files hits do ([`highlight_focus_matches`]).
+    FocusMatch,
 }
 
 impl From<StatusColorRole> for SegRole {
@@ -146,6 +172,8 @@ pub struct VisibleRow {
     pub foldable: bool,
     pub folded: bool,
     pub in_no_updates: bool,
+    /// The outside-focus group row or a row under it: paints muted.
+    pub outside_focus: bool,
     pub chrome: NodeChrome,
 }
 
@@ -166,6 +194,7 @@ impl Default for VisibleRow {
             foldable: false,
             folded: false,
             in_no_updates: false,
+            outside_focus: false,
             chrome: NodeChrome::default(),
         }
     }
@@ -179,6 +208,24 @@ pub fn build_tree(
     tree_mode: bool,
     workspace_label: &str,
 ) -> TreeNode {
+    build_focused_tree(snapshot, tree_mode, workspace_label, None)
+}
+
+/// [`build_tree`] narrowed by a focus query.
+///
+/// With a focus that has terms, the focused families build as today
+/// (attention families, then `No updates`), each with only the checkouts
+/// the focus keeps; the other families fold into the dimmed
+/// [`OUTSIDE_FOCUS_GROUP_ID`] group, the last child of the root, and the
+/// root carries the [`FocusChip`]. `snapshot` is the visible snapshot
+/// (positional filter and `hiddenPaths` already applied). `None` or an
+/// empty focus builds the plain tree.
+pub fn build_focused_tree(
+    snapshot: &WorkspaceSnapshot,
+    tree_mode: bool,
+    workspace_label: &str,
+    focus: Option<&TreeFocus>,
+) -> TreeNode {
     let mut families: BTreeMap<String, Vec<&WorkspaceRepoSnapshot>> = BTreeMap::new();
     for repo in &snapshot.repos {
         let key = repo
@@ -188,32 +235,22 @@ pub fn build_tree(
         families.entry(key).or_default().push(repo);
     }
 
-    let mut attention = Vec::new();
-    let mut idle = Vec::new();
-    for (primary, members) in families {
-        let needs = family_needs_attention(&members);
-        let nodes = family_nodes(&primary, members, tree_mode);
-        if needs {
-            attention.extend(nodes);
-        } else {
-            idle.extend(nodes);
+    let (children, focus_chip) = match focus.filter(|focus| !focus.is_empty()) {
+        Some(focus) => {
+            let (children, chip) = focus::focused_children(focus, snapshot, families, tree_mode);
+            (children, Some(chip))
         }
-    }
-
-    let mut children = attention;
-    if !idle.is_empty() {
-        children.push(TreeNode {
-            id: "group:no-updates".into(),
-            kind: NodeKind::Group,
-            label: "No updates".into(),
-            repo: None,
-            primary_repo: None,
-            hidden: false,
-            file: None,
-            children: idle,
-            chrome: NodeChrome::default(),
-        });
-    }
+        None => {
+            let nodes = families
+                .into_iter()
+                .map(|(primary, members)| {
+                    let needs = family_needs_attention(&members);
+                    (needs, family_nodes(&primary, members, tree_mode))
+                })
+                .collect();
+            (with_no_updates_group(nodes), None)
+        }
+    };
 
     let change_count = snapshot.repos.iter().map(|r| r.changes.len()).sum();
     TreeNode {
@@ -228,9 +265,40 @@ pub fn build_tree(
         chrome: NodeChrome {
             change_count,
             sync_summary: sync_summary(&snapshot.repos),
+            focus_chip,
             ..NodeChrome::default()
         },
     }
+}
+
+/// Root children from family nodes, each with its attention flag: the
+/// attention families in order, then the clean ones under the `No updates`
+/// group (left out when there are none).
+fn with_no_updates_group(families: Vec<(bool, Vec<TreeNode>)>) -> Vec<TreeNode> {
+    let mut attention = Vec::new();
+    let mut idle = Vec::new();
+    for (needs, nodes) in families {
+        if needs {
+            attention.extend(nodes);
+        } else {
+            idle.extend(nodes);
+        }
+    }
+    let mut children = attention;
+    if !idle.is_empty() {
+        children.push(TreeNode {
+            id: "group:no-updates".into(),
+            kind: NodeKind::Group,
+            label: "No updates".into(),
+            repo: None,
+            primary_repo: None,
+            hidden: false,
+            file: None,
+            children: idle,
+            chrome: NodeChrome::default(),
+        });
+    }
+    children
 }
 
 /// Cwd basename used as the workspace row label`).
@@ -315,11 +383,7 @@ fn family_nodes(
     mut members: Vec<&WorkspaceRepoSnapshot>,
     tree_mode: bool,
 ) -> Vec<TreeNode> {
-    members.sort_by(|a, b| {
-        let a_linked = i32::from(a.checkout_kind == CheckoutKind::Linked);
-        let b_linked = i32::from(b.checkout_kind == CheckoutKind::Linked);
-        a_linked.cmp(&b_linked).then_with(|| a.repo.cmp(&b.repo))
-    });
+    sort_family_members(&mut members);
     let has_linked = members
         .iter()
         .any(|m| m.checkout_kind == CheckoutKind::Linked);
@@ -333,6 +397,15 @@ fn family_nodes(
         .into_iter()
         .map(|m| repo_or_checkout(m, NodeKind::Repo, tree_mode))
         .collect()
+}
+
+/// Family checkout order: the primary first, then linked checkouts by path.
+fn sort_family_members(members: &mut [&WorkspaceRepoSnapshot]) {
+    members.sort_by(|a, b| {
+        let a_linked = i32::from(a.checkout_kind == CheckoutKind::Linked);
+        let b_linked = i32::from(b.checkout_kind == CheckoutKind::Linked);
+        a_linked.cmp(&b_linked).then_with(|| a.repo.cmp(&b.repo))
+    });
 }
 
 fn family_container(
@@ -719,11 +792,13 @@ pub fn dir_path_from_id(id: &str, repo: &str) -> Option<String> {
     Some(rest.strip_suffix("#unstaged").unwrap_or(rest).to_string())
 }
 
-/// Default folds: the No updates group starts closed.
+/// Default folds: the No updates and outside-focus groups start closed.
 pub fn default_folds(tree: &TreeNode) -> HashSet<String> {
     let mut folds = HashSet::new();
-    if tree.children.iter().any(|c| c.id == "group:no-updates") {
-        folds.insert("group:no-updates".into());
+    for group in ["group:no-updates", OUTSIDE_FOCUS_GROUP_ID] {
+        if tree.children.iter().any(|c| c.id == group) {
+            folds.insert(group.into());
+        }
     }
     folds
 }
@@ -781,8 +856,37 @@ pub fn flatten(tree: &TreeNode, folds: &HashSet<String>) -> Vec<VisibleRow> {
 pub fn flatten_with(tree: &TreeNode, folds: &HashSet<String>, ascii: bool) -> Vec<VisibleRow> {
     let tree_mode = detect_tree_mode(tree);
     let mut out = Vec::new();
-    walk(tree, 0, folds, ascii, tree_mode, false, &mut out);
+    walk(
+        tree,
+        0,
+        folds,
+        ascii,
+        tree_mode,
+        RowScope::default(),
+        &mut out,
+    );
     out
+}
+
+/// Which group a row sits under while [`walk`] flattens the tree.
+#[derive(Clone, Copy, Debug, Default)]
+struct RowScope {
+    /// Under the `No updates` group: clean rows paint the clean check.
+    in_no_updates: bool,
+    /// The outside-focus group or under it: the row paints muted.
+    outside_focus: bool,
+}
+
+impl RowScope {
+    /// Scope of the children of `node`. The outside-focus group is not a
+    /// `No updates` group: its clean rows get no clean check.
+    fn child(self, node: &TreeNode) -> Self {
+        let outside = node.id == OUTSIDE_FOCUS_GROUP_ID;
+        Self {
+            in_no_updates: self.in_no_updates || (node.kind == NodeKind::Group && !outside),
+            outside_focus: self.outside_focus || outside,
+        }
+    }
 }
 
 fn detect_tree_mode(node: &TreeNode) -> bool {
@@ -798,11 +902,13 @@ fn walk(
     folds: &HashSet<String>,
     ascii: bool,
     tree_mode: bool,
-    in_no_updates: bool,
+    scope: RowScope,
     out: &mut Vec<VisibleRow>,
 ) {
     let foldable = !node.children.is_empty();
     let folded = foldable && folds.contains(&node.id);
+    let in_no_updates = scope.in_no_updates;
+    let outside_focus = scope.outside_focus || node.id == OUTSIDE_FOCUS_GROUP_ID;
     let segs = node_segments(node, tree_mode, in_no_updates, ascii);
     let (label, right_raw) = segments_search_label(&segs);
     out.push(VisibleRow {
@@ -820,22 +926,15 @@ fn walk(
         foldable,
         folded,
         in_no_updates,
+        outside_focus,
         chrome: node.chrome.clone(),
     });
     if folded {
         return;
     }
-    let child_in_no_updates = in_no_updates || node.kind == NodeKind::Group;
+    let child_scope = scope.child(node);
     for child in &node.children {
-        walk(
-            child,
-            depth + 1,
-            folds,
-            ascii,
-            tree_mode,
-            child_in_no_updates,
-            out,
-        );
+        walk(child, depth + 1, folds, ascii, tree_mode, child_scope, out);
     }
 }
 
@@ -1149,6 +1248,12 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             .iter()
             .filter(|c| c.kind == NodeKind::Checkout)
             .count();
+        // A focus that keeps only some checkouts shows `k/n wt`.
+        let wt_text = if node.chrome.checkout_total > wt_count {
+            format!("{wt_count}/{} wt", node.chrome.checkout_total)
+        } else {
+            format!("{wt_count} wt")
+        };
         let segments = vec![TextSeg {
             text: node.chrome.path.clone(),
             role: name_role,
@@ -1160,11 +1265,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
         let mut trailing = sync_trailing(&node.chrome, in_no_updates, ascii);
         push_trailing_item(
             &mut trailing,
-            icon_text_seg(
-                format!("{wt_count} wt"),
-                SegRole::Muted,
-                IconKind::WorktreeCount,
-            ),
+            icon_text_seg(wt_text, SegRole::Muted, IconKind::WorktreeCount),
         );
         if node.chrome.change_count > 0 {
             push_trailing_item(&mut trailing, change_count_seg(node.chrome.change_count));
@@ -1374,15 +1475,92 @@ fn pr_total_variants(totals: PrTotals, narrow: bool) -> Vec<Vec<TextSeg>> {
 /// `N changed`, then `N`, then nothing. A `narrow` tree (under
 /// [`PR_REF_MIN_TREE_COLS`]) starts at the one-part total.
 ///
-/// Returns the segments and the columns of the PR total that ends them
-/// (`0` when the summary that fits shows no PR total), so the caller can
-/// record the total's click area without reading it back from the text.
+/// While a focus query is set ([`NodeChrome::focus_chip`]), the focus chip
+/// `◎ <query> · f/t repos` leads the summary, two spaces before it, and
+/// outlasts it: every summary step above gives way first, then the chip
+/// stands alone, then nothing shows.
+///
+/// Returns the segments and the columns of the PR total that ends them and
+/// of the focus chip that starts them, so the caller can record both click
+/// areas without reading them back from the text.
 pub(crate) fn workspace_trailing_fit(
     chrome: &NodeChrome,
     totals: PrTotals,
     narrow: bool,
     room: usize,
-) -> (Vec<TextSeg>, usize) {
+    ascii: bool,
+) -> WorkspaceTrailing {
+    let width =
+        |segs: &[TextSeg]| -> usize { segs.iter().map(|seg| visible_width(&seg.text)).sum() };
+    let summaries = workspace_summary_steps(chrome, totals, narrow);
+    let Some(chip) = &chrome.focus_chip else {
+        let (segs, pr_total_cols) = summaries
+            .into_iter()
+            .find(|(segs, _)| width(segs) < room)
+            .unwrap_or_default();
+        return WorkspaceTrailing {
+            segs,
+            pr_total_cols,
+            chip_cols: 0,
+        };
+    };
+    let chip = focus_chip_segments(chip, ascii);
+    let chip_cols = width(&chip);
+    let with_chip = summaries.into_iter().map(|(summary, cols)| {
+        let mut segs = chip.clone();
+        segs.push(text_seg(PR_BADGE_GAP, SegRole::Muted));
+        segs.extend(summary);
+        (segs, cols)
+    });
+    with_chip
+        .chain(std::iter::once((chip.clone(), 0)))
+        .find(|(segs, _)| width(segs) < room)
+        .map_or_else(WorkspaceTrailing::default, |(segs, pr_total_cols)| {
+            WorkspaceTrailing {
+                segs,
+                pr_total_cols,
+                chip_cols,
+            }
+        })
+}
+
+/// What [`workspace_trailing_fit`] fits on the workspace row.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WorkspaceTrailing {
+    /// The summary segments that fit (empty when none fits).
+    pub segs: Vec<TextSeg>,
+    /// Columns of the PR total that ends `segs` (`0` when it shows none).
+    pub pr_total_cols: usize,
+    /// Columns of the focus chip that starts `segs` (`0` when it shows
+    /// none). A click there is the chip's click.
+    pub chip_cols: usize,
+}
+
+/// Focus chip segments: `◎ <query>` bold in the heading colour, then
+/// ` · f/t repos` muted. ASCII glyphs paint `(o)` for `◎`.
+fn focus_chip_segments(chip: &FocusChip, ascii: bool) -> Vec<TextSeg> {
+    vec![
+        TextSeg {
+            bold: true,
+            ..text_seg(
+                format!("{} {}", icon_focus(ascii), chip.query),
+                SegRole::Heading,
+            )
+        },
+        text_seg(
+            format!(" · {}/{} repos", chip.focused, chip.total),
+            SegRole::Muted,
+        ),
+    ]
+}
+
+/// The workspace summary steps of [`workspace_trailing_fit`], widest
+/// first, each with the columns of the PR total it ends with.
+fn workspace_summary_steps(
+    chrome: &NodeChrome,
+    totals: PrTotals,
+    narrow: bool,
+) -> Vec<(Vec<TextSeg>, usize)> {
     let n = chrome.change_count;
     let summary = |text: String| vec![icon_text_seg(text, SegRole::Muted, IconKind::Workspace)];
     let summaries = [
@@ -1408,11 +1586,8 @@ pub(crate) fn workspace_trailing_fit(
         candidates.extend(summaries[1..].iter().map(|short| beside(short, need_you)));
         candidates.push((need_you.clone(), width(need_you)));
     }
+    candidates.extend(summaries.map(|summary| (summary, 0)));
     candidates
-        .into_iter()
-        .chain(summaries.map(|summary| (summary, 0)))
-        .find(|(segs, _)| width(segs) < room)
-        .unwrap_or_default()
 }
 
 /// Styled segments for a tree node — the TUI's only label source.
@@ -1426,6 +1601,13 @@ pub fn node_segments(
         NodeKind::Workspace => workspace_segments(node, ascii),
         NodeKind::Repo => repo_segments(node, in_no_updates, ascii),
         NodeKind::Checkout => checkout_segments(node, in_no_updates, ascii),
+        NodeKind::Group if node.id == OUTSIDE_FOCUS_GROUP_ID => NodeSegments {
+            segments: vec![
+                icon_seg(icon_focus(ascii), SegRole::Muted),
+                text_seg(node.label.clone(), SegRole::Muted),
+            ],
+            trailing: Vec::new(),
+        },
         NodeKind::Group => NodeSegments {
             segments: vec![
                 tagged(icon_seg(icon_clean(ascii), SegRole::Muted), IconKind::Clean),
@@ -1747,10 +1929,19 @@ pub fn painted_row_segments(
         with_pr_badge(&mut segs, ascii, pr);
     }
     let trailing = with_comment_mark(segs.trailing, ascii, commented, resolved);
-    NodeSegments {
+    let mut segs = NodeSegments {
         segments: segs.segments,
         trailing: with_viewed_mark(trailing, ascii, viewed && row.kind == NodeKind::File),
+    };
+    if row.outside_focus {
+        // Outside the focus: every segment and mark paints muted, as the
+        // name of a hidden repo does.
+        for seg in segs.segments.iter_mut().chain(segs.trailing.iter_mut()) {
+            seg.role = SegRole::Muted;
+            seg.hex = None;
+        }
     }
+    segs
 }
 
 /// Icons of `segs` in paint order: the label, then the trailing run. A

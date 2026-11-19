@@ -88,6 +88,44 @@ pub fn repo_snapshot(name: &str) -> RepoSnapshot {
     }
 }
 
+/// [`repo_snapshot`] for a primary checkout at `path` on `branch`.
+pub fn on_branch(path: &str, branch: &str) -> RepoSnapshot {
+    RepoSnapshot {
+        branch: branch.to_string(),
+        ..repo_snapshot(path)
+    }
+}
+
+/// [`repo_snapshot`] for a linked worktree of `primary` at `path` on
+/// `branch`.
+pub fn linked_checkout(path: &str, primary: &str, branch: &str) -> RepoSnapshot {
+    RepoSnapshot {
+        branch: branch.to_string(),
+        checkout_kind: CheckoutKind::Linked,
+        primary_repo: Some(primary.to_string()),
+        ..repo_snapshot(path)
+    }
+}
+
+/// The focus demo workspace: `app` (clean, on `main`) with linked worktrees
+/// `app/.worktrees/abc-123` on `feature/ABC-123-invoice-export` and
+/// `app/.worktrees/login` on `feature/login`; `services/api` on
+/// `feature/abc-123-api`; clean `lib`; dirty `notes` ([`repo`]).
+pub fn focus_workspace_repos() -> Vec<RepoSnapshot> {
+    vec![
+        repo_snapshot("app"),
+        linked_checkout(
+            "app/.worktrees/abc-123",
+            "app",
+            "feature/ABC-123-invoice-export",
+        ),
+        linked_checkout("app/.worktrees/login", "app", "feature/login"),
+        on_branch("services/api", "feature/abc-123-api"),
+        repo("lib", false),
+        repo("notes", true),
+    ]
+}
+
 /// One unstaged `M` edit of `path` (not staged, not untracked, no rename).
 pub fn unstaged_change(path: &str) -> FileChange {
     FileChange {

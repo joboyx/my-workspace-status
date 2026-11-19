@@ -92,19 +92,6 @@ pub fn checkout_kept(
         || focus.matches(checkout_path)
 }
 
-/// True when the focus keeps at least one of `members`, the checkouts of
-/// the family whose primary repo path is `family_primary_path`. A family
-/// that is not kept is outside the focus.
-pub fn family_kept(
-    focus: &TreeFocus,
-    family_primary_path: &str,
-    members: &[&WorkspaceRepoSnapshot],
-) -> bool {
-    members
-        .iter()
-        .any(|m| checkout_kept(focus, family_primary_path, &m.repo, &m.branch))
-}
-
 /// One family in the focused part of the tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FocusedFamily {
@@ -315,49 +302,14 @@ pub fn match_ranges(focus: &TreeFocus, text: &str) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{
-        build_workspace_snapshot, visible_workspace_snapshot, CheckoutKind, RepoSnapshot,
+    use crate::snapshot::{build_workspace_snapshot, visible_workspace_snapshot, RepoSnapshot};
+    use crate::testutil::{
+        focus_workspace_repos, linked_checkout as linked, on_branch, repo, repo_snapshot,
     };
-    use crate::testutil::{repo, repo_snapshot};
 
-    /// A linked worktree of `primary` at `path` on `branch`.
-    fn linked(path: &str, primary: &str, branch: &str) -> RepoSnapshot {
-        RepoSnapshot {
-            branch: branch.to_string(),
-            checkout_kind: CheckoutKind::Linked,
-            primary_repo: Some(primary.to_string()),
-            ..repo_snapshot(path)
-        }
-    }
-
-    /// A primary checkout at `path` on `branch`.
-    fn on_branch(path: &str, branch: &str) -> RepoSnapshot {
-        RepoSnapshot {
-            branch: branch.to_string(),
-            ..repo_snapshot(path)
-        }
-    }
-
-    /// The demo-like workspace: `app` with two linked worktrees, `services/api`
-    /// on a feature branch, clean `lib`, dirty `notes`.
+    /// The focus demo workspace ([`focus_workspace_repos`]).
     fn workspace() -> WorkspaceSnapshot {
-        build_workspace_snapshot(
-            &[
-                repo_snapshot("app"),
-                linked(
-                    "app/.worktrees/abc-123",
-                    "app",
-                    "feature/ABC-123-invoice-export",
-                ),
-                linked("app/.worktrees/login", "app", "feature/login"),
-                on_branch("services/api", "feature/abc-123-api"),
-                repo("lib", false),
-                repo("notes", true),
-            ],
-            &[],
-            false,
-            &[],
-        )
+        build_workspace_snapshot(&focus_workspace_repos(), &[], false, &[])
     }
 
     fn family(primary: &str, kept: &[&str], count: usize) -> FocusedFamily {
@@ -416,19 +368,6 @@ mod tests {
             "feature/y"
         ));
         assert!(checkout_kept(&TreeFocus::default(), "lib", "lib", "main"));
-    }
-
-    #[test]
-    fn family_kept_when_any_member_is_kept() {
-        let snapshot = workspace();
-        let app: Vec<&WorkspaceRepoSnapshot> = snapshot
-            .repos
-            .iter()
-            .filter(|r| r.repo.starts_with("app"))
-            .collect();
-        assert_eq!(app.len(), 3);
-        assert!(family_kept(&TreeFocus::parse("login"), "app", &app));
-        assert!(!family_kept(&TreeFocus::parse("billing"), "app", &app));
     }
 
     #[test]
