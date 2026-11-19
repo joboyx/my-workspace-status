@@ -391,6 +391,7 @@ A focused text field types every printable key it reads, nav letters (`h` / `j` 
 | `search-files` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `search_files_key_action`, `search_files_edit`, `draw_search_files` | supported |
 | `comment` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_keymap`, `draw_comment` | supported |
 | `create-branch` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_write`, `draw_create_branch` | supported |
+| `focus-prompt` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_focus`, `draw_focus_prompt` | supported |
 | `branch-picker` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_write`, `draw_branch_picker` | supported |
 | `compare-picker` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_keymap`, `draw_compare_picker` | supported |
 | `graph-focus-picker` | Workspace | - | overlay | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_keymap`, `draw_graph_focus_picker` | supported |

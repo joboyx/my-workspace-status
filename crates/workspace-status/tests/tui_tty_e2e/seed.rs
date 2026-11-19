@@ -242,6 +242,34 @@ pub fn tree_focus_workspace() -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+/// Branch of the linked worktree that [`tree_focus_family_workspace`] adds
+/// to `app`: no ticket token, so an `ABC-123` focus leaves it out.
+pub const FOCUS_LINKED_BRANCH: &str = "feature/login-form";
+
+/// [`tree_focus_workspace`] where `app` is a family: its primary checkout
+/// on `feature/ABC-123-invoice-export` plus a clean linked worktree
+/// `app/.worktrees/login` on [`FOCUS_LINKED_BRANCH`] (from `main`).
+pub fn tree_focus_family_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace) = tree_focus_workspace();
+    let app = workspace.join("app");
+    fs::write(app.join(".gitignore"), ".worktrees/\n").unwrap();
+    git(&app, &["add", ".gitignore"]);
+    git(&app, &["commit", "-q", "-m", "ignore linked worktree dir"]);
+    git(
+        &app,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            FOCUS_LINKED_BRANCH,
+            ".worktrees/login",
+            "main",
+        ],
+    );
+    (root, workspace)
+}
+
 /// Local `syncbox` is behind `origin/main` (fetch already ran).
 pub fn behind_workspace() -> (PathBuf, PathBuf) {
     let (root, workspace) = unfetched_behind_workspace();
