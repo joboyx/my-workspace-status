@@ -31,7 +31,7 @@ slow-tests = []
 
 [dependencies]
 clap = { version = "4.5.23", features = ["derive"] }
-crossterm = "0.28.1"
+crossterm = "0.29.0"
 # layout-cache: 0.30 moved the cache 0.29 always had behind this feature, and
 # the frame splits layouts on every draw.
 ratatui = { version = "0.30", default-features = false, features = ["layout-cache"] }
