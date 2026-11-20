@@ -10,6 +10,61 @@ permissions:
   contents: read
 
 jobs:
+  # Exec start latency of an already-run script, alone and while other
+  # processes start new script files, then the title-command tests under
+  # that load.
+  exec-stall:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: false
+      - name: Exec latency of a known script, without and with new-script churn
+        run: |
+          set -u
+          work="$RUNNER_TEMP/exec"; mkdir -p "$work"; cd "$work"
+          printf '#!/bin/sh\nexit 0\n' > warm; chmod +x warm; ./warm
+          cat > time_execs.py <<'EOF'
+          import subprocess, sys, time
+          n = int(sys.argv[2]); ms = []
+          for _ in range(n):
+              t = time.monotonic(); subprocess.run([sys.argv[1]]); ms.append((time.monotonic() - t) * 1000)
+          ms.sort()
+          print(f"{sys.argv[3]}: n={n} median={ms[n//2]:.0f}ms p95={ms[int(n*0.95)]:.0f}ms max={ms[-1]:.0f}ms over500={sum(m > 500 for m in ms)} over1500={sum(m > 1500 for m in ms)}")
+          EOF
+          python3 time_execs.py ./warm 200 quiet | tee -a "$GITHUB_STEP_SUMMARY"
+          for w in 1 2 3; do
+            ( n=0; while :; do f="new-$w-$n"; printf '#!/bin/sh\nexit 0\n' > "$f"; chmod +x "$f"; "./$f"; rm -f "$f"; n=$((n+1)); done ) &
+          done
+          sleep 2
+          python3 time_execs.py ./warm 200 churn | tee -a "$GITHUB_STEP_SUMMARY"
+          kill $(jobs -p) 2>/dev/null || true
+      - run: cargo test -p workspace-status --lib --locked --all-features --no-run
+      - name: title_command tests, 30 runs, with new-script churn
+        run: |
+          set -u
+          churn="$RUNNER_TEMP/churn"; mkdir -p "$churn"
+          for w in 1 2 3; do
+            ( cd "$churn"; n=0; while :; do f="new-$w-$n"; printf '#!/bin/sh\nexit 0\n' > "$f"; chmod +x "$f"; "./$f"; rm -f "$f"; n=$((n+1)); done ) &
+          done
+          runs=0; bad=0
+          for n in $(seq 1 30); do
+            runs=$((runs+1))
+            if ! cargo test -p workspace-status --lib --locked --all-features title_command >"t-$n.log" 2>&1; then
+              bad=$((bad+1))
+              grep -E '^test .* FAILED|took|left:' "t-$n.log" || true
+            fi
+          done
+          kill $(jobs -p) 2>/dev/null || true
+          summary="title_command under churn: runs=$runs failed_runs=$bad"
+          echo "$summary"; echo "$summary" >>"$GITHUB_STEP_SUMMARY"
+          for n in $(seq 1 30); do grep -E '^test .* FAILED' "t-$n.log" || true; done | sort | uniq -c | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$bad" -eq 0 ]
+
   loop:
     strategy:
       fail-fast: false
