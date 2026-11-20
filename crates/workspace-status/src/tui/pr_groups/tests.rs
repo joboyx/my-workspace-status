@@ -1214,10 +1214,13 @@ mod title_command {
         );
     }
 
-    /// About 1 MB after the first line: far more than a pipe holds.
-    const LOT_OF_OUTPUT: &str = "echo Title; i=0; while [ $i -lt 20000 ]; do \
-                        echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; \
-                        i=$((i+1)); done";
+    /// About 1 MB after the first line: far more than a pipe holds. `tr`
+    /// writes it in large blocks, so the command needs almost no CPU time
+    /// and only a reader that stops draining the pipe can hold it past the
+    /// limit. A shell loop that prints one line at a time needs a few
+    /// hundred milliseconds of CPU, and on a busy macOS runner that took the
+    /// run past the 2 s limit.
+    const LOT_OF_OUTPUT: &str = "echo Title; head -c 1000000 /dev/zero | tr '\\0' x";
 
     #[test]
     fn a_command_with_a_lot_of_output_is_not_stalled() {
