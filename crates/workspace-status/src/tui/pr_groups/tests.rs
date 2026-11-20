@@ -1214,45 +1214,23 @@ mod title_command {
         );
     }
 
-    /// About 1 MB after the first line: far more than a pipe holds. `tr`
-    /// writes it in large blocks, so the command needs almost no CPU time
-    /// and only a reader that stops draining the pipe can hold it past the
-    /// limit. A shell loop that prints one line at a time needs a few
-    /// hundred milliseconds of CPU, and on a busy macOS runner that took the
-    /// run past the 2 s limit.
-    const LOT_OF_OUTPUT: &str = "echo Title; head -c 1000000 /dev/zero | tr '\\0' x";
-
     #[test]
     fn a_command_with_a_lot_of_output_is_not_stalled() {
+        // About 1 MB after the first line: far more than a pipe holds. `tr`
+        // writes it in large blocks, so the command needs almost no CPU
+        // time and only a reader that stops draining the pipe can hold it
+        // past the limit. A shell loop that prints one line at a time needs
+        // a few hundred milliseconds of CPU, and on a busy macOS runner that
+        // took the run past the 2 s limit.
+        let body = "echo Title; head -c 1000000 /dev/zero | tr '\\0' x";
         let started = Instant::now();
-        let title = run(LOT_OF_OUTPUT, "ABC-123");
+        let title = run(body, "ABC-123");
         assert_eq!(
             title,
             Some("Title".to_string()),
             "took {:?}",
             started.elapsed()
         );
-    }
-
-    /// TEMPORARY (MYWS-100 repro loop, removed before merge): runs the
-    /// same command with no practical limit and appends how long it took
-    /// to the file `MYWS100_DURATIONS` names.
-    #[test]
-    fn probe_myws100_lot_of_output_duration() {
-        use std::io::Write;
-        let Some(out) = std::env::var_os("MYWS100_DURATIONS") else {
-            return;
-        };
-        let script = Script::new(LOT_OF_OUTPUT);
-        let started = Instant::now();
-        let title = run_title_command_within(&script.path, "ABC-123", Duration::from_secs(60));
-        let ms = started.elapsed().as_millis();
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(out)
-            .unwrap();
-        writeln!(file, "{ms} {title:?}").unwrap();
     }
 
     #[test]
