@@ -1,0 +1,60 @@
+# TEMPORARY (MYWS-100): repeat the macOS lib suite to measure the flaky
+# title-command test. Removed before merge.
+name: myws-100-macos-loop
+
+on:
+  push:
+    branches: [bugfix/MYWS-100-flaky-title-command-test]
+
+permissions:
+  contents: read
+
+jobs:
+  loop:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    runs-on: macos-15
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: false
+      - name: Host facts and an unloaded run of the command body
+        run: |
+          sysctl -n hw.ncpu machdep.cpu.brand_string || true
+          /bin/sh --version | head -1
+          body='echo Title; i=0; while [ $i -lt 20000 ]; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done'
+          for n in 1 2 3; do /usr/bin/time -p /bin/sh -c "$body" | cat >/dev/null; done
+      - run: cargo test -p workspace-status --lib --locked --all-features --no-run
+      - name: Full lib suite, 6 runs
+        env:
+          MYWS100_DURATIONS: ${{ runner.temp }}/durations.txt
+        run: |
+          set -u
+          test='tui::pr_groups::tests::title_command::a_command_with_a_lot_of_output_is_not_stalled'
+          pass=0; fail=0; missing=0
+          for n in 1 2 3 4 5 6; do
+            cargo test -p workspace-status --lib --locked --all-features >"run-$n.log" 2>&1 || true
+            grep '^test result:' "run-$n.log" || true
+            if grep -qF "test $test ... ok" "run-$n.log"; then
+              pass=$((pass+1))
+            elif grep -qF "test $test ... FAILED" "run-$n.log"; then
+              fail=$((fail+1))
+              grep -A6 -F -- "---- $test stdout" "run-$n.log" || true
+            else
+              missing=$((missing+1))
+            fi
+            grep -E '^test .* \.\.\. FAILED' "run-$n.log" || true
+          done
+          echo "probe durations (ms, title) under the full suite:"
+          sort -n "$MYWS100_DURATIONS"
+          ms=$(cut -d' ' -f1 "$MYWS100_DURATIONS" | sort -n)
+          summary="shard ${{ matrix.shard }}: target test pass=$pass fail=$fail missing=$missing; probe ms min=$(echo "$ms" | head -1) max=$(echo "$ms" | tail -1) all=[$(echo $ms)]"
+          echo "$summary"
+          echo "$summary" >>"$GITHUB_STEP_SUMMARY"
+          [ "$fail" -eq 0 ] && [ "$missing" -eq 0 ]

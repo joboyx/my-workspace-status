@@ -1214,13 +1214,42 @@ mod title_command {
         );
     }
 
-    #[test]
-    fn a_command_with_a_lot_of_output_is_not_stalled() {
-        // About 1 MB after the first line: far more than a pipe holds.
-        let body = "echo Title; i=0; while [ $i -lt 20000 ]; do \
+    /// About 1 MB after the first line: far more than a pipe holds.
+    const LOT_OF_OUTPUT: &str = "echo Title; i=0; while [ $i -lt 20000 ]; do \
                         echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; \
                         i=$((i+1)); done";
-        assert_eq!(run(body, "ABC-123"), Some("Title".to_string()));
+
+    #[test]
+    fn a_command_with_a_lot_of_output_is_not_stalled() {
+        let started = Instant::now();
+        let title = run(LOT_OF_OUTPUT, "ABC-123");
+        assert_eq!(
+            title,
+            Some("Title".to_string()),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// TEMPORARY (MYWS-100 repro loop, removed before merge): runs the
+    /// same command with no practical limit and appends how long it took
+    /// to the file `MYWS100_DURATIONS` names.
+    #[test]
+    fn probe_myws100_lot_of_output_duration() {
+        use std::io::Write;
+        let Some(out) = std::env::var_os("MYWS100_DURATIONS") else {
+            return;
+        };
+        let script = Script::new(LOT_OF_OUTPUT);
+        let started = Instant::now();
+        let title = run_title_command_within(&script.path, "ABC-123", Duration::from_secs(60));
+        let ms = started.elapsed().as_millis();
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(out)
+            .unwrap();
+        writeln!(file, "{ms} {title:?}").unwrap();
     }
 
     #[test]
