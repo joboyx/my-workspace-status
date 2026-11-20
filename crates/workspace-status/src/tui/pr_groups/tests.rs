@@ -1222,9 +1222,9 @@ mod title_command {
         // past the limit. A shell loop that prints one line at a time needs
         // a few hundred milliseconds of CPU, and on a busy macOS runner that
         // took the run past the 2 s limit.
-        let body = "echo Title; head -c 1000000 /dev/zero | tr '\\0' x";
+        let script = Script::new("echo Title; head -c 1000000 /dev/zero | tr '\\0' x");
         let started = Instant::now();
-        let title = run(body, "ABC-123");
+        let title = run_title_command(&script.path, "ABC-123");
         assert_eq!(
             title,
             Some("Title".to_string()),
