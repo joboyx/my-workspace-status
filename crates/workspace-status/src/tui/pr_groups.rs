@@ -713,7 +713,10 @@ fn run_title_command_within(cmd: &Path, key: &str, limit: Duration) -> Option<St
         return None;
     }
     let deadline = Instant::now() + limit;
+    // TEMPORARY (MYWS-100 trace): phase times of this run.
+    let t0 = Instant::now();
     let mut child = spawn_title_command(cmd, key, deadline)?;
+    let spawned = t0.elapsed();
     let tracked = crate::git::TrackedGroup::register(child.id());
     // A stop that ran between the check above and the registration did
     // not see this group: end it here.
@@ -725,11 +728,55 @@ fn run_title_command_within(cmd: &Path, key: &str, limit: Duration) -> Option<St
         kill_and_reap(child);
         return None;
     };
-    let first_line = read_first_line(pipe);
+    let marks = std::sync::Arc::new(std::sync::Mutex::new((None, None, 0u64)));
+    let first_line = {
+        let marks = marks.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(pipe);
+            let mut line = Vec::new();
+            let _ = (&mut reader)
+                .take(TITLE_LINE_MAX)
+                .read_until(b'\n', &mut line);
+            marks.lock().unwrap().0 = Some(t0.elapsed());
+            let _ = tx.send(line);
+            let n = io::copy(&mut reader, &mut io::sink()).unwrap_or(0);
+            let mut m = marks.lock().unwrap();
+            m.1 = Some(t0.elapsed());
+            m.2 = n;
+        });
+        rx
+    };
+    let trace = |outcome: &str| {
+        let Some(out) = std::env::var_os("MYWS100_TRACE") else {
+            return;
+        };
+        use std::io::Write;
+        let m = *marks.lock().unwrap();
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(out)
+        {
+            let _ = writeln!(
+                file,
+                "limit={}ms spawn={}ms first_line={:?} eof={:?} bytes={} end={}ms outcome={outcome} cmd={}",
+                limit.as_millis(),
+                spawned.as_millis(),
+                m.0.map(|d| d.as_millis()),
+                m.1.map(|d| d.as_millis()),
+                m.2,
+                t0.elapsed().as_millis(),
+                cmd.display()
+            );
+        }
+    };
     let Some(status) = wait_until(&mut child, deadline, &AtomicBool::new(false)) else {
+        trace("timeout");
         kill_and_reap(child);
         return None;
     };
+    trace(&format!("exit:{status}"));
     // The command is one-shot: once it exits, end anything it left in its
     // group. A background child that keeps stdout open would otherwise keep
     // the reader thread alive, one thread per run.
