@@ -148,6 +148,7 @@ fn badge(state: PrState, ref_text: Option<&str>) -> PrBadge {
     PrBadge {
         mark: PrMark::State(state),
         ref_text: ref_text.map(str::to_string),
+        position: None,
         stale: false,
     }
 }
@@ -211,6 +212,61 @@ fn pr_badge_paints_its_ref_muted_and_its_glyph_bold_in_the_state_colour() {
     }
 }
 
+/// A stacked PR paints its position between the ref and the glyph
+/// (`#8 ⧗2/3 ◌`, ASCII `#8 2/3 d`), muted, not bold, tagged with the
+/// badge kind so one icon hit covers it; with no ref it paints nothing,
+/// so it drops with the ref.
+#[test]
+fn pr_badge_paints_the_stack_position_between_ref_and_glyph() {
+    for ascii in [false, true] {
+        for stale in [false, true] {
+            let what = format!("ascii={ascii} stale={stale}");
+            let (glyph, position) = if ascii {
+                ("d", "2/3")
+            } else {
+                ("◌", "⧗2/3")
+            };
+            assert_eq!(pr_stack_position_text(ascii, 2, 3), position, "{what}");
+            let pr = PrBadge {
+                position: Some((2, 3)),
+                stale,
+                ..badge(PrState::Draft, Some("#8"))
+            };
+            let mut segs = NodeSegments {
+                segments: vec![text_seg("feature", SegRole::BranchFeature)],
+                trailing: vec![change_count_seg(3)],
+            };
+            let at = with_pr_badge(&mut segs, ascii, Some(&pr)).expect("badge");
+            let texts: Vec<&str> = segs.trailing.iter().map(|seg| seg.text.as_str()).collect();
+            assert_eq!(
+                texts,
+                ["3", "  ", "#8", " ", position, " ", glyph],
+                "{what}"
+            );
+            assert_eq!(at, segs.trailing.len() - 1, "{what}");
+            let mark = &segs.trailing[at - 2];
+            assert_eq!(
+                (mark.role, mark.icon, mark.bold),
+                (SegRole::Muted, Some(IconKind::PrDraft), false),
+                "{what}"
+            );
+            assert_eq!(segs.trailing[at - 1].icon, None, "{what}: the gap");
+
+            let mut segs = NodeSegments {
+                segments: vec![text_seg("feature", SegRole::BranchFeature)],
+                trailing: Vec::new(),
+            };
+            let glyph_only = PrBadge {
+                ref_text: None,
+                ..pr.clone()
+            };
+            with_pr_badge(&mut segs, ascii, Some(&glyph_only)).expect("badge");
+            let texts: Vec<&str> = segs.trailing.iter().map(|seg| seg.text.as_str()).collect();
+            assert_eq!(texts, [glyph], "{what}: no ref, no position");
+        }
+    }
+}
+
 /// A failed lookup with no earlier answer ends the run with `!` alone,
 /// bold in the deleted colour, tagged as the failure mark, in both
 /// glyph modes; it is never muted.
@@ -226,6 +282,7 @@ fn pr_lookup_failed_badge_paints_a_bold_red_bang_alone() {
             let pr = PrBadge {
                 mark: PrMark::LookupFailed,
                 ref_text: None,
+                position: None,
                 stale,
             };
             let at = with_pr_badge(&mut segs, ascii, Some(&pr)).expect("badge");

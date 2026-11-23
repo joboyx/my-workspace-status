@@ -136,7 +136,14 @@ base=$dir/glab/$(slug "$(urldecode "$project")")
 
 case $resource in
   merge_requests)
-    serve "$base/mr-list/$(slug "$(query_param source_branch)").json"
+    # `source_branch` lists the MRs of one branch; `target_branch` alone
+    # lists the MRs that target one branch (the stack children).
+    source=$(query_param source_branch)
+    target=$(query_param target_branch)
+    if [ -z "$source" ] && [ -n "$target" ]; then
+      serve "$base/mr-list-base/$(slug "$target").json"
+    fi
+    serve "$base/mr-list/$(slug "$source").json"
     ;;
   merge_requests/*/approvals)
     iid=${resource#merge_requests/}

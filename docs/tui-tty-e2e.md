@@ -52,7 +52,7 @@ PR badge tests need `gh` and `glab` answers with no network and no login. `scrip
 `FakeForge` in `crates/workspace-status/tests/common/fake_forge.rs` wires them into a spawn:
 
 - `FakeForge::new(root)` makes a scenario directory and a `$BROWSER` recorder under `root`.
-- The setters (`github_pr_list`, `github_pr_view`, `gitlab_mr_list`, `gitlab_mr`, `gitlab_approvals`, `gitlab_pipeline_jobs`) write what the CLI prints (`Reply::Json`) or how it fails (`Reply::Fail`: exit code and stderr). Each write goes to a temporary name and is renamed, so a setter called while the app runs swaps the answer for the next call only.
+- The setters (`github_pr_list`, `github_pr_list_base`, `github_pr_view`, `gitlab_mr_list`, `gitlab_mr_list_base`, `gitlab_mr`, `gitlab_approvals`, `gitlab_pipeline_jobs`) write what the CLI prints (`Reply::Json`) or how it fails (`Reply::Fail`: exit code and stderr). The `_base` setters answer the stack walk's child lists: `gh pr list --base <branch>` and the GitLab MR list by `target_branch`, the open PRs that target a branch. Each write goes to a temporary name and is renamed, so a setter called while the app runs swaps the answer for the next call only.
 - `forge.env()` goes to `PtySession::open_with_env`: `PATH` with the scripts first, `WS_FAKE_FORGE_DIR`, and `BROWSER`. The update-check store, UI store, `XDG_CONFIG_HOME`, and theme mode isolation stay as in **Harness notes**.
 - `forge.calls()` gives the argv line of each CLI call. `forge.opened()` gives each URL the `$BROWSER` recorder got.
 - `set_origin(repo, url)` points a seeded repo's `origin` at a forge URL (`GITHUB_ORIGIN`, `GITLAB_ORIGIN`). Only `git remote` runs.

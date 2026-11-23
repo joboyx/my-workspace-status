@@ -1,7 +1,8 @@
 #!/bin/sh
-# Fake `gh` for e2e tests. Answers `gh pr list` and `gh pr view` from scenario
-# files under $WS_FAKE_FORGE_DIR. It reads flags, not exact argv strings, so a
-# change to the `--json` field list does not matter. Format: README.md.
+# Fake `gh` for e2e tests. Answers `gh pr list` (by `--head` or `--base`) and
+# `gh pr view` from scenario files under $WS_FAKE_FORGE_DIR. It reads flags,
+# not exact argv strings, so a change to the `--json` field list does not
+# matter. Format: README.md.
 
 dir=${WS_FAKE_FORGE_DIR:-}
 if [ -z "$dir" ] || [ ! -d "$dir" ]; then
@@ -63,6 +64,7 @@ fi
 
 repo=
 head=
+base_branch=
 number=
 while [ $# -gt 0 ]; do
   case $1 in
@@ -76,9 +78,14 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] && shift
       ;;
     --head=*) head=${1#--head=} ;;
+    -B | --base)
+      base_branch=${2:-}
+      [ $# -ge 2 ] && shift
+      ;;
+    --base=*) base_branch=${1#--base=} ;;
     # Flags with a value this fake ignores: skip the value too.
-    --json | --state | --limit | --search | --author | --base | --label | --jq | --template | \
-      -s | -L | -S | -A | -B | -l | -q | -t)
+    --json | --state | --limit | --search | --author | --label | --jq | --template | \
+      -s | -L | -S | -A | -l | -q | -t)
       [ $# -ge 2 ] && shift
       ;;
     -*) ;;
@@ -101,7 +108,14 @@ fi
 base=$dir/gh/${owner}__${name}
 
 case "$group $verb" in
-  'pr list') serve "$base/pr-list/$(slug "$head").json" ;;
+  'pr list')
+    # `--head` lists the PRs of one branch; `--base` alone lists the PRs
+    # that target one branch (the stack children).
+    if [ -z "$head" ] && [ -n "$base_branch" ]; then
+      serve "$base/pr-list-base/$(slug "$base_branch").json"
+    fi
+    serve "$base/pr-list/$(slug "$head").json"
+    ;;
   'pr view') serve "$base/pr-view/$number.json" ;;
 esac
 printf 'fake forge: no scenario for %s\n' "$argv" >&2

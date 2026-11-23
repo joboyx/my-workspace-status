@@ -75,7 +75,9 @@ use super::ops::{
     OpTally, RepoOpResult, RunningOp,
 };
 use super::pr_groups::{PrGroup, TitleCache};
-use super::pull_request::{is_web_url, lookup, lookup_detail, PrDetailLookup, PrLookup, PrPage};
+use super::pull_request::{
+    is_web_url, lookup, lookup_detail, lookup_stack, PrDetailLookup, PrLookup, PrPage, PrStack,
+};
 #[cfg(not(test))]
 use super::pull_request::{open_in_browser, run_cli};
 use super::remote_view::{self, RemoteTarget};
@@ -292,12 +294,14 @@ pub(crate) enum JobOutcome {
         remote: Option<String>,
     },
     /// Badge lookup of `branch` in checkout `repo`. `remote` is the URL the
-    /// worker resolved.
+    /// worker resolved. `stack` is the stack walk of a found PR
+    /// ([`lookup_stack`]); `Ok(None)` when no PR was found.
     PullRequestBadge {
         repo: PathBuf,
         branch: String,
         remote: Option<String>,
         lookup: PrLookup,
+        stack: Result<Option<PrStack>, Option<String>>,
     },
     /// Popover detail fetch of PR `number` for `branch` of checkout `repo`
     /// at `remote`.
@@ -2799,9 +2803,10 @@ impl Interpreter {
                 branch,
                 remote,
                 lookup,
+                stack,
             } => {
                 self.release_pr_badge(&repo, &branch);
-                if state.apply_pr_lookup(&repo, &branch, remote, lookup) {
+                if state.apply_pr_badge(&repo, &branch, remote, lookup, stack) {
                     // A pinned or peeked popover, and the active PRs tab,
                     // ask again for a detail whose answer changed.
                     let details = state.request_pr_details();
@@ -4483,6 +4488,10 @@ impl Interpreter {
                     if let Some((repo, branch)) = self.pr_badges.pop_front() {
                         self.pr_badges_running += 1;
                         self.pr_badge_jobs.insert((repo.clone(), branch.clone()));
+                        // The stack rule's default branch, read here so the
+                        // queue entry stays (checkout, branch).
+                        let default_branch =
+                            state.pr_stack_default_branch(&repo).map(str::to_string);
                         spawn(
                             id,
                             JobRelease::PrBadge {
@@ -4493,11 +4502,22 @@ impl Interpreter {
                                 let run = |argv: &[String]| cli(argv, &cancel);
                                 let remote = remote_url_for_branch(&cwd.join(&repo), &branch);
                                 let lookup = lookup(remote.as_deref(), &branch, &run);
+                                // A found PR walks its stack in the same job.
+                                let stack = match &lookup {
+                                    PrLookup::Found(pr) => lookup_stack(
+                                        remote.as_deref(),
+                                        pr,
+                                        default_branch.as_deref(),
+                                        &run,
+                                    ),
+                                    PrLookup::NoPr | PrLookup::Failed(_) => Ok(None),
+                                };
                                 JobOutcome::PullRequestBadge {
                                     repo,
                                     branch,
                                     remote,
                                     lookup,
+                                    stack,
                                 }
                             }),
                         );

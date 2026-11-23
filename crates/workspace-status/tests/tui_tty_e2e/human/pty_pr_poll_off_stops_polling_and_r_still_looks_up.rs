@@ -5,20 +5,22 @@ use crate::common::fake_forge::FakeForge;
 use crate::common::pr_scenarios::Badge;
 use crate::harness::PtySession;
 use crate::pr_support::{
-    badge_is, forge_env, list_calls, named_workspace, seed_checkouts, Forge, PrCheckout,
+    badge_is, children_calls, forge_env, list_calls, named_workspace, seed_checkouts, Forge,
+    PrCheckout,
 };
 use crate::support::{tree_cursor_on, GIT_WAIT, WAIT};
 
 /// How long no list call may appear: about seven 300 ms poll periods.
 const QUIET: Duration = Duration::from_millis(2000);
 
-/// The call log keeps its size for `QUIET` while the app runs.
+/// The call log keeps `count` list calls and as many children calls (one
+/// stack walk per found PR) for `QUIET` while the app runs.
 fn calls_stay_at(forge: &FakeForge, count: usize) {
     let start = Instant::now();
     while start.elapsed() < QUIET {
         assert_eq!(
-            list_calls(forge).len(),
-            count,
+            (list_calls(forge).len(), children_calls(forge).len()),
+            (count, count),
             "a list call appeared with polling off: {:?}",
             forge.calls()
         );
@@ -79,6 +81,24 @@ fn pty_pr_poll_off_stops_polling_and_r_still_looks_up() {
         (1, 1),
         "one list call per checkout at launch: {launch:?}"
     );
+    // Each found PR walks its stack in the same job, before its badge
+    // shows: one children list each (this set has none, so the walk fails
+    // and nothing else changes).
+    let children = children_calls(&forge);
+    assert_eq!(
+        (
+            children
+                .iter()
+                .filter(|c| c.starts_with("gh pr list "))
+                .count(),
+            children
+                .iter()
+                .filter(|c| c.starts_with("glab api "))
+                .count()
+        ),
+        (1, 1),
+        "one children list per found PR at launch: {children:?}"
+    );
 
     // The answers change; nobody asks, so nothing happens.
     github.set(&forge, Badge::CiFailed);
@@ -115,9 +135,9 @@ fn pty_pr_poll_off_stops_polling_and_r_still_looks_up() {
         GIT_WAIT,
     );
     assert_eq!(
-        list_calls(&forge).len(),
-        4,
-        "each r made exactly one list call: {:?}",
+        (list_calls(&forge).len(), children_calls(&forge).len()),
+        (4, 4),
+        "each r made exactly one list call and one children list: {:?}",
         forge.calls()
     );
     calls_stay_at(&forge, 4);

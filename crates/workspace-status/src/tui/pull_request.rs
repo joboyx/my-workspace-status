@@ -25,10 +25,14 @@
 //! author, branches, checks, check names, reviews, notes, CI link, update
 //! time) for the PR popover, with the same runner and argv-builder style.
 //!
+//! [`lookup_stack`] walks the stacked PR chain around a found PR ([`PrStack`]):
+//! its parents down the base branches, and the open PRs that target its head
+//! branch, recursively, with the same runner.
+//!
 //! A runner answers `Ok(stdout)`, or `Err` with the reason when there is
 //! one: the CLI's first stderr line, or `<program> not found`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -464,6 +468,11 @@ pub(crate) fn percent_encode(text: &str) -> String {
     out
 }
 
+/// `--json` fields of a `gh pr list`: what [`GitHubPr`] reads.
+const GITHUB_LIST_FIELDS: &str =
+    "number,state,url,title,headRefName,baseRefName,isCrossRepository,isDraft,\
+     reviewDecision,mergeStateStatus,statusCheckRollup,updatedAt";
+
 /// `gh pr list` argv (program first) for every PR whose head is `branch`.
 pub fn github_list_argv(repo: &ForgeRepo, branch: &str) -> Vec<String> {
     [
@@ -477,8 +486,30 @@ pub fn github_list_argv(repo: &ForgeRepo, branch: &str) -> Vec<String> {
         "--state",
         "all",
         "--json",
-        "number,state,url,title,headRefName,baseRefName,isCrossRepository,isDraft,\
-         reviewDecision,mergeStateStatus,statusCheckRollup,updatedAt",
+        GITHUB_LIST_FIELDS,
+        "--limit",
+        "30",
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
+/// `gh pr list` argv (program first) for every open PR whose base is
+/// `branch`: the children of the PR whose head is `branch`
+/// ([`lookup_stack`]). Same fields as [`github_list_argv`].
+pub fn github_children_argv(repo: &ForgeRepo, branch: &str) -> Vec<String> {
+    [
+        "gh",
+        "pr",
+        "list",
+        "-R",
+        &format!("{}/{}", repo.host, repo.path),
+        "--base",
+        branch,
+        "--state",
+        "open",
+        "--json",
+        GITHUB_LIST_FIELDS,
         "--limit",
         "30",
     ]
@@ -490,6 +521,18 @@ pub fn github_list_argv(repo: &ForgeRepo, branch: &str) -> Vec<String> {
 pub fn gitlab_list_argv(repo: &ForgeRepo, branch: &str) -> Vec<String> {
     let endpoint = format!(
         "projects/{}/merge_requests?source_branch={}&state=all&per_page=30",
+        percent_encode(&repo.path),
+        percent_encode(branch)
+    );
+    gitlab_api_argv(repo, endpoint)
+}
+
+/// `glab api` argv (program first) for every open MR whose target is
+/// `branch`: the children of the MR whose source is `branch`
+/// ([`lookup_stack`]).
+pub fn gitlab_children_argv(repo: &ForgeRepo, branch: &str) -> Vec<String> {
+    let endpoint = format!(
+        "projects/{}/merge_requests?target_branch={}&state=opened&per_page=30",
         percent_encode(&repo.path),
         percent_encode(branch)
     );
@@ -1072,15 +1115,185 @@ pub fn lookup(remote_url: Option<&str>, branch: &str, run: Runner) -> PrLookup {
     let Some(repo) = remote_url.and_then(parse_remote) else {
         return PrLookup::NoPr;
     };
-    let found = match repo.forge {
-        Forge::GitHub => github_lookup(&repo, branch, run),
-        Forge::GitLab => gitlab_lookup(&repo, branch, run),
-    };
-    match found {
+    match branch_pr(&repo, branch, run) {
         Ok(Some(pr)) => PrLookup::Found(pr),
         Ok(None) => PrLookup::NoPr,
         Err(why) => PrLookup::Failed(why),
     }
+}
+
+/// The PR that counts for `branch` in `repo`: the per-branch rule of
+/// [`lookup`] on either forge.
+fn branch_pr(
+    repo: &ForgeRepo,
+    branch: &str,
+    run: Runner,
+) -> Result<Option<PullRequest>, Option<String>> {
+    match repo.forge {
+        Forge::GitHub => github_lookup(repo, branch, run),
+        Forge::GitLab => gitlab_lookup(repo, branch, run),
+    }
+}
+
+/// Most parents [`lookup_stack`] walks down from a PR.
+pub const STACK_DEPTH_MAX: usize = 10;
+
+/// Most members a [`PrStack`] holds, the PR itself included.
+pub const STACK_MEMBERS_MAX: usize = 20;
+
+/// The stacked PR chain around one PR, in one repository: a child's base
+/// branch is its parent's head branch.
+///
+/// A PR with no parent and no child has no stack, so `members` always holds
+/// at least two PRs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrStack {
+    /// The chain in display order: the root parent first, then each parent
+    /// up to this PR, this PR, then its descendants depth-first (each PR's
+    /// children by number, each child followed by its own descendants).
+    pub members: Vec<PullRequest>,
+    /// Index of this PR in [`Self::members`]. Its position text is
+    /// `this + 1` of `members.len()`.
+    pub this: usize,
+}
+
+impl PrStack {
+    /// Position of this PR in the chain: its 1-based place and the member
+    /// count (`(2, 3)` paints `2/3`).
+    pub fn position(&self) -> (usize, usize) {
+        (self.this + 1, self.members.len())
+    }
+}
+
+/// One open child PR that a children list found.
+struct StackChild {
+    /// Head (source) branch of the child.
+    head: String,
+    /// The child as the badge rule reads it. A GitHub list entry carries
+    /// every status field, so it is ready here. A GitLab entry is `None`:
+    /// [`gitlab_lookup`] on [`Self::head`] reads it with the single MR call,
+    /// so its status rules match the badge.
+    pr: Option<PullRequest>,
+}
+
+/// The open PRs of `repo` whose base is `base`, by number. A PR from a
+/// fork or another repository, or one with no head branch, does not count.
+fn open_children(
+    repo: &ForgeRepo,
+    base: &str,
+    run: Runner,
+) -> Result<Vec<StackChild>, Option<String>> {
+    let open = |state: &str| kind_of(state) == Some(Kind::Open);
+    let mut children: Vec<(u64, StackChild)> = match repo.forge {
+        Forge::GitHub => {
+            let prs: Vec<GitHubPr> = parse(&run(&github_children_argv(repo, base))?)?;
+            prs.into_iter()
+                .filter(|pr| !pr.is_cross_repository && open(&pr.state))
+                .filter_map(|pr| {
+                    let head = pr.head_ref_name.clone().filter(|head| !head.is_empty())?;
+                    let number = pr.number;
+                    let pr = Some(github_pull_request(pr, Kind::Open));
+                    Some((number, StackChild { head, pr }))
+                })
+                .collect()
+        }
+        Forge::GitLab => {
+            let mrs: Vec<GitLabMr> = parse(&run(&gitlab_children_argv(repo, base))?)?;
+            mrs.into_iter()
+                .filter(|mr| mr.source_project_id == mr.target_project_id && open(&mr.state))
+                .filter_map(|mr| {
+                    let head = mr.source_branch.filter(|head| !head.is_empty())?;
+                    Some((mr.iid, StackChild { head, pr: None }))
+                })
+                .collect()
+        }
+    };
+    children.sort_by_key(|(number, _)| *number);
+    Ok(children.into_iter().map(|(_, child)| child).collect())
+}
+
+/// Walk the stacked PR chain around `pr`, the PR that counts for its head
+/// branch on the forge behind `remote_url`.
+///
+/// Blocks on the forge CLI through `run`, the same injectable runner as
+/// [`lookup`].
+///
+/// - **Parents:** while the current base can be stacked on
+///   ([`can_stack_on`] with `default_branch`, the configured or known
+///   default branch), the PR that counts for that base branch, by the rule
+///   of [`lookup`] (open over merged, same repository). The walk stops at no
+///   PR, at a branch it already saw, or after [`STACK_DEPTH_MAX`] parents.
+/// - **Children:** for `pr` and each descendant whose head branch can be
+///   stacked on, the open PRs whose base is that head ([`github_children_argv`],
+///   [`gitlab_children_argv`]), by number, depth-first. A fork PR and a
+///   branch already seen are dropped. A GitLab child is read again with
+///   [`gitlab_lookup`] on its source branch. The walk stops listing at
+///   [`STACK_MEMBERS_MAX`] members.
+///
+/// `Ok(None)` when no parent and no child is found, and for no remote or an
+/// unsupported forge (no CLI call). Any failed CLI call fails the walk with
+/// its reason when there is one.
+pub fn lookup_stack(
+    remote_url: Option<&str>,
+    pr: &PullRequest,
+    default_branch: Option<&str>,
+    run: Runner,
+) -> Result<Option<PrStack>, Option<String>> {
+    let Some(repo) = remote_url.and_then(parse_remote) else {
+        return Ok(None);
+    };
+    let mut seen = HashSet::from([pr.head.clone()]);
+
+    let mut parents = Vec::new();
+    let mut base = pr.base.clone();
+    while parents.len() < STACK_DEPTH_MAX
+        && can_stack_on(&base, default_branch)
+        && !seen.contains(&base)
+    {
+        let Some(parent) = branch_pr(&repo, &base, run)? else {
+            break;
+        };
+        seen.insert(std::mem::replace(&mut base, parent.base.clone()));
+        parents.push(parent);
+    }
+    parents.reverse();
+    let this = parents.len();
+    let mut members = parents;
+    members.push(pr.clone());
+
+    // Depth-first: `todo` holds found children still to add, the next one
+    // on top; a PR's children go on top of its later siblings.
+    let mut todo: Vec<StackChild> = Vec::new();
+    let mut expand = Some(pr.head.clone());
+    loop {
+        if let Some(head) = expand.take() {
+            if members.len() < STACK_MEMBERS_MAX && can_stack_on(&head, default_branch) {
+                let children = open_children(&repo, &head, run)?;
+                let new: Vec<StackChild> = children
+                    .into_iter()
+                    .filter(|child| seen.insert(child.head.clone()))
+                    .collect();
+                todo.extend(new.into_iter().rev());
+            }
+        }
+        if members.len() >= STACK_MEMBERS_MAX {
+            break;
+        }
+        let Some(child) = todo.pop() else {
+            break;
+        };
+        let child_pr = match child.pr {
+            Some(child_pr) => child_pr,
+            None => match gitlab_lookup(&repo, &child.head, run)? {
+                Some(child_pr) => child_pr,
+                None => continue,
+            },
+        };
+        members.push(child_pr);
+        expand = Some(child.head);
+    }
+
+    Ok((members.len() > 1).then_some(PrStack { members, this }))
 }
 
 /// `gh pr view --json` detail object. Every field but the number may be

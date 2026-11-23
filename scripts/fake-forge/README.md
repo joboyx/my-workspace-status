@@ -9,8 +9,10 @@ The scripts read flags and the `glab api` endpoint, not whole argv strings, so a
 | Call | Scenario file |
 | --- | --- |
 | `gh pr list -R <host>/<owner>/<repo> --head <branch> …` | `gh/<owner>__<repo>/pr-list/<branch>.json` |
+| `gh pr list -R <host>/<owner>/<repo> --base <branch> …` (no `--head`) | `gh/<owner>__<repo>/pr-list-base/<branch>.json` |
 | `gh pr view <n> -R <host>/<owner>/<repo> …` | `gh/<owner>__<repo>/pr-view/<n>.json` |
 | `glab api … projects/<path>/merge_requests?source_branch=<branch>&…` | `glab/<path>/mr-list/<branch>.json` |
+| `glab api … projects/<path>/merge_requests?target_branch=<branch>&…` (no `source_branch`) | `glab/<path>/mr-list-base/<branch>.json` |
 | `glab api … projects/<path>/merge_requests/<iid>` | `glab/<path>/mr/<iid>.json` |
 | `glab api … projects/<path>/merge_requests/<iid>/approvals` | `glab/<path>/mr/<iid>-approvals.json` |
 | `glab api … projects/<path>/pipelines/<id>/jobs?…` | `glab/<path>/pipeline-jobs/<id>.json` |

@@ -9730,6 +9730,7 @@ fn tree_badge(state: PrState, ref_text: Option<&str>) -> PrBadge {
     PrBadge {
         mark: PrMark::State(state),
         ref_text: ref_text.map(str::to_string),
+        position: None,
         stale: false,
     }
 }
@@ -18146,6 +18147,141 @@ fn tree_pr_glyphs_share_one_column_and_refs_drop_on_a_narrow_tree() {
     }
 }
 
+/// The chain #7 → #8 → #9 of `forge_url` (a PR URL with `{n}` for the
+/// number), seen from #8 (`feature`, in `state`): #8 is 2 of 3.
+fn stack_of(forge_url: &str, state: PrState) -> crate::tui::pull_request::PrStack {
+    let pr = |number: u64, head: &str, base: &str, state| PullRequest {
+        head: head.into(),
+        base: base.into(),
+        ..PullRequest::fixture(
+            number,
+            &forge_url.replace("{n}", &number.to_string()),
+            state,
+        )
+    };
+    crate::tui::pull_request::PrStack {
+        members: vec![
+            pr(7, "feature/a", "main", PrState::InReview),
+            pr(8, "feature", "feature/a", state),
+            pr(9, "feature/c", "feature", PrState::Draft),
+        ],
+        this: 1,
+    }
+}
+
+/// Land #8 of `stack` for checkout `repo` on `feature` at `remote`, with
+/// its stack.
+fn set_stacked_pr(
+    state: &mut AppState,
+    repo: &str,
+    remote: &str,
+    stack: &crate::tui::pull_request::PrStack,
+) {
+    assert!(state.apply_pr_badge(
+        Path::new(repo),
+        "feature",
+        Some(remote.into()),
+        PrLookup::Found(stack.members[stack.this].clone()),
+        Ok(Some(stack.clone())),
+    ));
+}
+
+/// A stacked PR's tree badge paints `<ref> <position> <glyph>` flush
+/// right: `#8 ⧗2/3 ◌` (ASCII `#8 2/3 d`), the position muted, in both
+/// looks, both glyph modes, and on both forges. One icon hit covers ref,
+/// position, and glyph; the link covers the ref only. A tree too narrow
+/// for the ref paints the glyph alone.
+#[test]
+fn tree_pr_badge_paints_the_stack_position_between_ref_and_glyph() {
+    let palette = ThemeId::TokyoNight.palette();
+    let forges = [
+        (PR_REMOTE, "https://github.com/octo/demo/pull/{n}", "#8"),
+        (
+            "git@gitlab.com:acme/services/api.git",
+            "https://gitlab.com/acme/services/api/-/merge_requests/{n}",
+            "!8",
+        ),
+    ];
+    for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+        for ascii in [true, false] {
+            for (remote, url, ref_text) in forges {
+                for (cols, wide) in [(160, true), (96, false)] {
+                    let what = format!("{background:?} ascii={ascii} {ref_text} {cols} cols");
+                    let mut state = pr_state(
+                        &[branch_repo("app", "feature"), branch_repo("lib", "main")],
+                        ascii,
+                    );
+                    state.background = background;
+                    let stack = stack_of(url, PrState::Draft);
+                    set_stacked_pr(&mut state, "app", remote, &stack);
+                    let mut terminal = Terminal::new(TestBackend::new(cols, 24)).unwrap();
+                    terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                    let tree_width = usize::from(state.layout.tree_width);
+                    assert_eq!(tree_width >= PR_REF_MIN_TREE_COLS, wide, "{what}");
+                    let buf = terminal.backend().buffer();
+                    let y = tree_row_y(&state, "repo:app");
+                    let edge = state.layout.tree_x + state.layout.tree_width - 1;
+                    let (glyph, position) = if ascii {
+                        ("d", "2/3")
+                    } else {
+                        ("◌", "⧗2/3")
+                    };
+                    let hits = state.layout.pr_badge_hits();
+                    if !wide {
+                        let row = buf_line(buf, y);
+                        assert_eq!(buf[(edge, y)].symbol(), glyph, "{what}: {row}");
+                        assert!(!row.contains(ref_text), "{what}: {row}");
+                        assert!(!row.contains(position), "{what}: {row}");
+                        assert_eq!(hits.len(), 1, "{what}");
+                        assert_eq!((hits[0].x, hits[0].width), (edge, 1), "{what}");
+                        continue;
+                    }
+                    let text = format!("{ref_text} {position} {glyph}");
+                    let width = text.chars().count() as u16;
+                    let x = edge + 1 - width;
+                    let cells: String = (x..=edge).map(|x| buf[(x, y)].symbol()).collect();
+                    assert_eq!(cells, text, "{what}");
+                    assert_eq!(buf[(x - 1, y)].symbol(), " ", "{what}");
+                    let pos_x = x + ref_text.len() as u16 + 1;
+                    assert_eq!(buf[(pos_x, y)].fg, palette.muted, "{what}: position");
+                    assert!(
+                        !buf[(pos_x, y)].modifier.contains(Modifier::BOLD),
+                        "{what}: position"
+                    );
+                    assert_eq!(buf[(edge, y)].fg, palette.muted, "{what}: draft glyph");
+                    assert!(buf[(edge, y)].modifier.contains(Modifier::BOLD), "{what}");
+                    assert_eq!(
+                        hits,
+                        vec![PrBadgeHit {
+                            y,
+                            x,
+                            width,
+                            repo: PathBuf::from("app"),
+                        }],
+                        "{what}: one hit over ref, position, and glyph"
+                    );
+                    assert_eq!(
+                        state.layout.links,
+                        vec![crate::tui::hyperlink::LinkHit {
+                            y,
+                            x,
+                            width: ref_text.len() as u16,
+                            url: url.replace("{n}", "8"),
+                        }],
+                        "{what}: one link over the ref only"
+                    );
+                    let effect = state.dispatch(Action::CtrlClick { col: pos_x, row: y });
+                    assert_eq!(
+                        pr_opened(&effect),
+                        Some((PathBuf::from("app"), "feature".to_string())),
+                        "{what}: Ctrl+click on the position opens the PR"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// A row with a force-pushed upstream and a PR: the PR glyph stays in
 /// the last tree column, the branch clips first, and then the force-push
 /// text gives way (whole, then ` force-pushed`, then gone) so the repo
@@ -21799,6 +21935,116 @@ fn graph_header_chip_reads_state_ref_label_and_next_action() {
         sync.branch = "old".into();
     }
     assert!(graph_pr_chip(&state, now).is_none());
+}
+
+/// A stacked PR's header chip paints its position after the ref in every
+/// candidate, muted, as part of the head (the icon hit), and a last
+/// candidate drops it; both forges, both glyph modes. Its parent is not
+/// checked out, yet the next action names it (`pr_stack_base` reads the
+/// stack).
+#[test]
+fn graph_header_chip_paints_the_stack_position_after_the_ref() {
+    let palette = ThemeId::TokyoNight.palette();
+    let now = 1_800_000_000;
+    let forges = [
+        (
+            PR_REMOTE,
+            "https://github.com/octo/demo/pull/{n}",
+            "#8",
+            "#7",
+        ),
+        (
+            "git@gitlab.com:acme/services/api.git",
+            "https://gitlab.com/acme/services/api/-/merge_requests/{n}",
+            "!8",
+            "!7",
+        ),
+    ];
+    for (remote, url, ref_text, base_ref) in forges {
+        for ascii in [true, false] {
+            let what = format!("{ref_text} ascii={ascii}");
+            let stack = stack_of(url, PrState::Ready);
+            let mut state = chip_state(remote, stack.members[1].clone(), ascii);
+            set_stacked_pr(&mut state, "app", remote, &stack);
+            let chip = graph_pr_chip(&state, now).expect(&what);
+            let (glyph, position, arrow) = if ascii {
+                ("A", "2/3", ">")
+            } else {
+                ("◉", "⧗2/3", "▸")
+            };
+            let head = format!("{glyph} {ref_text} {position}");
+            let texts: Vec<String> = chip.candidates.iter().map(chip_text).collect();
+            assert_eq!(
+                texts,
+                [
+                    format!("{head} ready to merge  {arrow} merge {base_ref} first"),
+                    format!("{head} ready to merge"),
+                    head.clone(),
+                    format!("{glyph} {ref_text}"),
+                ],
+                "{what}"
+            );
+            assert_eq!(
+                usize::from(chip.head_width),
+                head.chars().count(),
+                "{what}: the head covers the position"
+            );
+            let spans = &chip.candidates[0].spans;
+            assert_eq!(spans[4].content, position, "{what}");
+            assert_eq!(spans[4].style.fg, Some(palette.muted), "{what}");
+        }
+    }
+}
+
+/// The stacked chip paints flush right on the graph sync header at depth
+/// 0 and depth 1, boxed and flat: its hit covers `<glyph> <ref>
+/// <position>` and its link the ref alone.
+#[test]
+fn graph_header_chip_paints_the_stack_position_in_every_look() {
+    let url = "https://github.com/octo/demo/pull/{n}";
+    for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+        for depth_1 in [false, true] {
+            let what = format!("{background:?} depth_1={depth_1}");
+            let stack = stack_of(url, PrState::CiFailed);
+            let mut state = chip_state(PR_REMOTE, stack.members[1].clone(), true);
+            set_stacked_pr(&mut state, "app", PR_REMOTE, &stack);
+            show_graph_at(&mut state, depth_1, background);
+            state.tree_cols = Some(if depth_1 { 96 } else { 48 });
+            let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let (x0, width) = graph_pane_cols(&state, depth_1);
+            let hit = state
+                .layout
+                .icon_hits
+                .iter()
+                .find(|hit| hit.kind == IconKind::PrCiFailed && hit.x >= x0)
+                .cloned()
+                .unwrap_or_else(|| panic!("{what}: chip hit in\n{}", buffer_text(&terminal)));
+            let buf = terminal.backend().buffer();
+            let header: String = (x0..x0 + width).map(|x| buf[(x, hit.y)].symbol()).collect();
+            let want = "x #8 2/3 CI failed  > fix CI";
+            assert!(header.ends_with(want), "{what}: {header:?}");
+            let chip_x = x0 + width - want.chars().count() as u16;
+            assert_eq!(
+                (hit.x, hit.width, &hit.target),
+                (chip_x, 8, &IconTarget::PullRequest(PathBuf::from("app"))),
+                "{what}: the hit covers `x #8 2/3`"
+            );
+            assert!(
+                state
+                    .layout
+                    .links
+                    .contains(&crate::tui::hyperlink::LinkHit {
+                        y: hit.y,
+                        x: hit.x + 2,
+                        width: 2,
+                        url: url.replace("{n}", "8"),
+                    }),
+                "{what}: {:?}",
+                state.layout.links
+            );
+        }
+    }
 }
 
 /// The PR [`found_pr`] wraps.

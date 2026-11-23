@@ -459,13 +459,32 @@ pub fn click_badge(tui: &mut PtySession, name: &str) {
     tui.sgr_click(badge.col, badge.row);
 }
 
-/// `calls.log` lines of `forge` that are a list lookup (`gh pr list`, the
-/// GitLab merge request list), not a detail or approvals call.
+/// `calls.log` lines of `forge` that are a per-branch list lookup (`gh pr
+/// list --head`, the GitLab merge request list by `source_branch`): the
+/// badge lookups, and the parent lookups of a stack walk. Not a detail,
+/// approvals, or children list call ([`children_calls`]).
 pub fn list_calls(forge: &FakeForge) -> Vec<String> {
     forge
         .calls()
         .into_iter()
-        .filter(|call| call.starts_with("gh pr list ") || call.contains("/merge_requests?"))
+        .filter(|call| {
+            (call.starts_with("gh pr list ") && call.contains(" --head "))
+                || call.contains("/merge_requests?source_branch=")
+        })
+        .collect()
+}
+
+/// `calls.log` lines of `forge` that list the children of a PR in a stack
+/// walk (`gh pr list --base`, the GitLab merge request list by
+/// `target_branch`): one per found PR whose head can be stacked on.
+pub fn children_calls(forge: &FakeForge) -> Vec<String> {
+    forge
+        .calls()
+        .into_iter()
+        .filter(|call| {
+            (call.starts_with("gh pr list ") && call.contains(" --base "))
+                || call.contains("/merge_requests?target_branch=")
+        })
         .collect()
 }
 

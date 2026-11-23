@@ -2,8 +2,8 @@ use crate::common::fake_forge::FakeForge;
 use crate::common::pr_scenarios::Badge;
 use crate::harness::PtySession;
 use crate::pr_support::{
-    badge_is, forge_env, list_calls, named_workspace, seed_checkouts, toast_count, toast_text,
-    Forge, PrCheckout,
+    badge_is, children_calls, forge_env, list_calls, named_workspace, seed_checkouts, toast_count,
+    toast_text, Forge, PrCheckout,
 };
 use crate::support::{open_command_palette, type_palette_filter, wait_screen, GIT_WAIT, WAIT};
 
@@ -60,6 +60,7 @@ fn pty_pr_poll_many_changes_show_two_toasts_and_a_summary() {
         GIT_WAIT,
     );
     let before = list_calls(&forge).len();
+    let children_before = children_calls(&forge).len();
 
     for checkout in &checkouts {
         checkout.set(&forge, Badge::CiFailed);
@@ -99,5 +100,10 @@ fn pty_pr_poll_many_changes_show_two_toasts_and_a_summary() {
         list_calls(&forge).len(),
         before + 4,
         "one Refresh PRs looked each checkout up once, and nothing polled"
+    );
+    assert_eq!(
+        children_calls(&forge).len(),
+        children_before + 4,
+        "each found PR walked its stack once: one children list each"
     );
 }

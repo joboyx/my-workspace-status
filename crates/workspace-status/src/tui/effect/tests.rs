@@ -6752,6 +6752,7 @@ fn a_landed_badge_lookup_asks_a_pinned_popover_detail_again_after_a_change() {
         lookup: PrLookup::Found(crate::tui::pull_request::PullRequest::fixture(
             7, PR_URL, pr_state,
         )),
+        stack: Ok(None),
     };
     apply(
         &mut interp,
@@ -6935,6 +6936,128 @@ fn a_poll_tick_queues_pollable_checkouts_once() {
     );
 }
 
+// ---- Stacked PR chain ----
+
+thread_local! {
+    /// Every argv the stack fakes were asked to run (sync pump: same
+    /// thread), joined with spaces.
+    static STACK_CALLS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn stack_calls() -> Vec<String> {
+    STACK_CALLS.with(|calls| calls.borrow_mut().drain(..).collect())
+}
+
+/// `gh pr list` of the chain #7 (`feature/a` into `main`) → #8
+/// (`feature`): `--head` answers the PR of that branch, any other list
+/// (children) none.
+fn gh_stacked_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+    STACK_CALLS.with(|calls| calls.borrow_mut().push(argv.join(" ")));
+    let head = argv
+        .iter()
+        .position(|arg| arg == "--head")
+        .and_then(|at| argv.get(at + 1));
+    let pr = |number: u64, head: &str, base: &str| {
+        format!(
+            r#"[{{"number":{number},"state":"OPEN","url":"https://github.com/octo/demo/pull/{number}","headRefName":"{head}","baseRefName":"{base}","isCrossRepository":false}}]"#
+        )
+    };
+    Ok(match head.map(String::as_str) {
+        Some("feature") => pr(8, "feature", "feature/a"),
+        Some("feature/a") => pr(7, "feature/a", "main"),
+        _ => "[]".into(),
+    })
+}
+
+/// [`gh_stacked_pr`] whose every call but the badge lookup of `feature`
+/// fails: the stack walk fails, the badge lookup works.
+fn gh_stack_walk_fails(argv: &[String], cancel: &AtomicBool) -> Result<String, Option<String>> {
+    let badge = argv
+        .windows(2)
+        .any(|pair| pair[0] == "--head" && pair[1] == "feature");
+    if badge {
+        gh_stacked_pr(argv, cancel)
+    } else {
+        STACK_CALLS.with(|calls| calls.borrow_mut().push(argv.join(" ")));
+        Err(Some("HTTP 502: Bad Gateway".into()))
+    }
+}
+
+/// The badge job of a found PR walks its stack in the same job (parent
+/// by its head, children by this PR's head) and lands it beside the
+/// answer. A failed walk keeps that stack with no toast or outage. The
+/// job reads the stack rule's default branch from the checkout's
+/// configured override: with `feature/a` as default, #8 has no parent.
+#[test]
+fn the_badge_job_walks_the_stack_of_a_found_pr_and_lands_it() {
+    use crate::tui::pull_request::{github_children_argv, github_list_argv, parse_remote};
+    let remote = "git@github.com:octo/demo.git";
+    let (root, mut state) = pr_app("ws-effect-pr-stack", Some(remote));
+    let path = Path::new("app");
+    let repo = parse_remote(remote).expect("forge repo");
+    let mut interp = Interpreter::with_cap(8);
+    let tui_opts = opts(&state);
+    let _ = stack_calls();
+    let look_up = |interp: &mut Interpreter, state: &mut AppState, cli: PrCliRunner| {
+        interp.pr_cli = cli;
+        state.forget_pr_lookups(Some(path));
+        interp.queue_due_pr_lookups(state, &tui_opts);
+        drain_jobs(interp, state, 10);
+    };
+    look_up(&mut interp, &mut state, gh_stacked_pr);
+    let numbers = |state: &AppState| -> Option<(Vec<u64>, usize)> {
+        let stack = state.pr_stack(path)?;
+        Some((
+            stack.members.iter().map(|pr| pr.number).collect(),
+            stack.this,
+        ))
+    };
+    assert_eq!(numbers(&state), Some((vec![7, 8], 1)));
+    assert_eq!(
+        stack_calls(),
+        [
+            github_list_argv(&repo, "feature").join(" "),
+            github_list_argv(&repo, "feature/a").join(" "),
+            github_children_argv(&repo, "feature").join(" "),
+        ],
+        "badge lookup, parent, children"
+    );
+
+    look_up(&mut interp, &mut state, gh_stack_walk_fails);
+    assert_eq!(
+        numbers(&state),
+        Some((vec![7, 8], 1)),
+        "a failed walk keeps it"
+    );
+    assert_eq!(stack_calls().len(), 2, "badge lookup, failed parent lookup");
+    assert_eq!(state.pr_lookup_failure(path), None);
+    assert!(state.outages.is_empty(), "no outage");
+    assert_eq!(state.toasts.visible(Instant::now()).count(), 0, "no toast");
+    assert!(state.status.is_empty(), "no status");
+
+    let row = state
+        .snapshot
+        .repos
+        .iter_mut()
+        .find(|row| row.repo == "app")
+        .expect("app row");
+    row.default_branch_override = Some("feature/a".into());
+    look_up(&mut interp, &mut state, gh_stacked_pr);
+    assert_eq!(
+        numbers(&state),
+        None,
+        "no parent through the default branch"
+    );
+    assert_eq!(
+        stack_calls(),
+        [
+            github_list_argv(&repo, "feature").join(" "),
+            github_children_argv(&repo, "feature").join(" "),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 // ---- PR change alerts ----
 
 pub(super) fn gh_merged_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
@@ -7023,6 +7146,7 @@ fn the_pr_changes_of_one_poll_cycle_alert_once_its_last_lookup_lands() {
             branch: "main".into(),
             remote: Some(remote(name)),
             lookup: found(number, pr_state),
+            stack: Ok(None),
         };
         apply(&mut interp, &mut state, outcome);
     }
@@ -7096,6 +7220,7 @@ fn pr_changes_alert_within_the_wait_bound_while_poll_cycles_overlap() {
             branch: "main".into(),
             remote: Some(remote("b")),
             lookup: found(2, PrState::Ready),
+            stack: Ok(None),
         };
         apply(interp, state, outcome);
     };
@@ -7152,6 +7277,7 @@ fn a_title_fill_runs_on_a_worker_and_lands_in_the_group_headers() {
         branch: "feature/ABC-120-cache".into(),
         remote: Some(crate::tui::state::prs_fixtures::GH_LIB.into()),
         lookup: PrLookup::NoPr,
+        stack: Ok(None),
     };
     apply(&mut interp, &mut state, outcome);
     assert_eq!(interp.sched.queued_user_tag(UserTag::PrTitles), 1);
@@ -7170,6 +7296,7 @@ fn a_title_fill_runs_on_a_worker_and_lands_in_the_group_headers() {
         branch: "feature/ABC-120-cache".into(),
         remote: Some(crate::tui::state::prs_fixtures::GH_LIB.into()),
         lookup: PrLookup::NoPr,
+        stack: Ok(None),
     };
     apply(&mut interp, &mut state, outcome);
     assert_eq!(interp.sched.queued_user_tag(UserTag::PrTitles), 0);
