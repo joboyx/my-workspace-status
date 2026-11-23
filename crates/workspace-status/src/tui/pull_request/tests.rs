@@ -197,6 +197,30 @@ fn gitlab_argv_encodes_subgroup_path_and_branch() {
         gitlab_jobs_argv(&r, 99),
         api("projects/group%2Fsub%2Fdemo/pipelines/99/jobs?scope[]=failed&scope[]=running")
     );
+    assert_eq!(
+        gitlab_children_argv(&r, "feature/a b+c"),
+        api("projects/group%2Fsub%2Fdemo/merge_requests\
+                 ?target_branch=feature%2Fa%20b%2Bc&state=opened&per_page=30")
+    );
+}
+
+#[test]
+fn github_children_argv_lists_open_prs_by_base_with_the_list_fields() {
+    let r = repo(Forge::GitHub, "github.com", "octo/demo");
+    let mut want = github_list_argv(&r, "feature/login");
+    want[5] = "--base".into();
+    want[8] = "open".into();
+    assert_eq!(github_children_argv(&r, "feature/login"), want);
+    assert_eq!(
+        &want[4..9],
+        strings(&[
+            "github.com/octo/demo",
+            "--base",
+            "feature/login",
+            "--state",
+            "open"
+        ])
+    );
 }
 
 #[test]
@@ -1665,6 +1689,548 @@ fn a_long_lived_or_default_base_is_never_a_stack() {
         "the configured default branch"
     );
     assert_eq!(top.stacked_on([&release], Some("main")), Some(&release));
+}
+
+// ---- lookup_stack ----
+
+const FORGES: [Forge; 2] = [Forge::GitHub, Forge::GitLab];
+
+/// One PR that a [`StackForge`] knows.
+struct Member {
+    number: u64,
+    head: String,
+    base: String,
+    open: bool,
+    /// From a fork (GitHub `isCrossRepository`, GitLab another source
+    /// project).
+    fork: bool,
+}
+
+fn open_pr(number: u64, head: &str, base: &str) -> Member {
+    Member {
+        number,
+        head: head.into(),
+        base: base.into(),
+        open: true,
+        fork: false,
+    }
+}
+
+fn merged_pr(number: u64, head: &str, base: &str) -> Member {
+    Member {
+        open: false,
+        ..open_pr(number, head, base)
+    }
+}
+
+fn fork_pr(number: u64, head: &str, base: &str) -> Member {
+    Member {
+        fork: true,
+        ..open_pr(number, head, base)
+    }
+}
+
+/// `text` as a raw JSON string value.
+fn json_text(text: &str) -> String {
+    serde_json::Value::from(text).to_string()
+}
+
+fn stack_remote(forge: Forge) -> &'static str {
+    match forge {
+        Forge::GitHub => GH_REMOTE,
+        Forge::GitLab => GL_REMOTE,
+    }
+}
+
+fn stack_repo(forge: Forge) -> ForgeRepo {
+    parse_remote(stack_remote(forge)).expect("test remote")
+}
+
+/// The per-branch list call of `branch`.
+fn stack_list_argv(forge: Forge, branch: &str) -> Vec<String> {
+    match forge {
+        Forge::GitHub => github_list_argv(&stack_repo(forge), branch),
+        Forge::GitLab => gitlab_list_argv(&stack_repo(forge), branch),
+    }
+}
+
+/// The children list call of `branch`.
+fn stack_children_argv(forge: Forge, branch: &str) -> Vec<String> {
+    match forge {
+        Forge::GitHub => github_children_argv(&stack_repo(forge), branch),
+        Forge::GitLab => gitlab_children_argv(&stack_repo(forge), branch),
+    }
+}
+
+/// `member` as a list entry of `forge`, in the real CLI shape.
+fn stack_entry(forge: Forge, member: &Member) -> String {
+    match forge {
+        Forge::GitHub => {
+            let state = if member.open { "OPEN" } else { "MERGED" };
+            let entry = gh_pr(
+                member.number,
+                state,
+                &member.head,
+                "REVIEW_REQUIRED",
+                "2026-01-02T00:00:00Z",
+            );
+            let fork = if member.fork { "true" } else { "false" };
+            json_with(
+                &entry,
+                &[
+                    ("baseRefName", &json_text(&member.base)),
+                    ("isCrossRepository", fork),
+                ],
+            )
+        }
+        Forge::GitLab => {
+            let state = if member.open { "opened" } else { "merged" };
+            let entry = gl_mr(member.number, state, "2026-01-02T00:00:00.000Z");
+            let project = if member.fork { "8" } else { "7" };
+            json_with(
+                &entry,
+                &[
+                    ("source_branch", &json_text(&member.head)),
+                    ("target_branch", &json_text(&member.base)),
+                    ("source_project_id", project),
+                ],
+            )
+        }
+    }
+}
+
+/// A fake forge for the stack walk that knows `members`. It answers by
+/// exact argv: the per-branch list and the children list of every branch a
+/// member names (entries in `members` order), and on GitLab the single MR
+/// of every member. Any other call panics. It records every call.
+struct StackForge {
+    forge: Forge,
+    answers: HashMap<Vec<String>, Answer>,
+    calls: RefCell<Vec<Vec<String>>>,
+}
+
+impl StackForge {
+    fn new(forge: Forge, members: &[Member]) -> Self {
+        let list = |entries: Vec<String>| -> Answer { Ok(format!("[{}]", entries.join(","))) };
+        let mut answers = HashMap::new();
+        for member in members {
+            for branch in [&member.head, &member.base] {
+                let heads = members.iter().filter(|m| &m.head == branch);
+                let children = members.iter().filter(|m| &m.base == branch && m.open);
+                answers.insert(
+                    stack_list_argv(forge, branch),
+                    list(heads.map(|m| stack_entry(forge, m)).collect()),
+                );
+                answers.insert(
+                    stack_children_argv(forge, branch),
+                    list(children.map(|m| stack_entry(forge, m)).collect()),
+                );
+            }
+            if forge == Forge::GitLab {
+                let view = gl_view_of(&stack_entry(forge, member), "");
+                answers.insert(gitlab_mr_argv(&gl_repo(), member.number), Ok(view));
+            }
+        }
+        Self {
+            forge,
+            answers,
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Answer `argv` with `answer` instead.
+    fn answer(mut self, argv: Vec<String>, answer: Answer) -> Self {
+        self.answers.insert(argv, answer);
+        self
+    }
+
+    fn run(&self, argv: &[String]) -> Answer {
+        self.calls.borrow_mut().push(argv.to_vec());
+        self.answers
+            .get(argv)
+            .cloned()
+            .unwrap_or_else(|| panic!("unexpected call {argv:?}"))
+    }
+
+    /// The badge lookup of `head`, then the stack walk around the PR it
+    /// found. [`Self::calls`] then holds the walk's calls only.
+    fn walk(
+        &self,
+        head: &str,
+        default_branch: Option<&str>,
+    ) -> Result<Option<PrStack>, Option<String>> {
+        let remote = Some(stack_remote(self.forge));
+        let run = |argv: &[String]| self.run(argv);
+        let pr = found_pr(lookup(remote, head, &run));
+        self.calls.borrow_mut().clear();
+        let stack = lookup_stack(remote, &pr, default_branch, &run);
+        if let Ok(Some(stack)) = &stack {
+            assert_eq!(stack.members[stack.this], pr, "this PR is the found one");
+        }
+        stack
+    }
+
+    fn called(&self, argv: &[String]) -> bool {
+        self.calls.borrow().iter().any(|call| call == argv)
+    }
+}
+
+/// Member numbers and the index of this PR.
+fn chain(stack: Result<Option<PrStack>, Option<String>>) -> (Vec<u64>, usize) {
+    let stack = stack.expect("the walk answers").expect("a stack");
+    let numbers = stack.members.iter().map(|pr| pr.number).collect();
+    (numbers, stack.this)
+}
+
+#[test]
+fn stack_walks_a_three_deep_parent_chain_down_to_the_long_lived_base() {
+    for forge in FORGES {
+        let fake = StackForge::new(
+            forge,
+            &[
+                merged_pr(1, "a", "main"),
+                open_pr(2, "b", "a"),
+                open_pr(3, "c", "b"),
+                open_pr(4, "d", "c"),
+            ],
+        );
+        assert_eq!(
+            chain(fake.walk("d", None)),
+            (vec![1, 2, 3, 4], 3),
+            "{forge:?}"
+        );
+        assert!(!fake.called(&stack_list_argv(forge, "main")), "{forge:?}");
+        assert!(fake.called(&stack_children_argv(forge, "d")), "{forge:?}");
+    }
+}
+
+#[test]
+fn stack_lists_children_recursively_depth_first_by_number() {
+    for forge in FORGES {
+        let fake = StackForge::new(
+            forge,
+            &[
+                open_pr(1, "a", "main"),
+                open_pr(5, "e", "a"),
+                open_pr(2, "b", "a"),
+                open_pr(3, "c", "b"),
+            ],
+        );
+        assert_eq!(
+            chain(fake.walk("a", None)),
+            (vec![1, 2, 3, 5], 0),
+            "{forge:?}"
+        );
+    }
+}
+
+#[test]
+fn stack_walks_both_directions_without_siblings_of_this_pr() {
+    for forge in FORGES {
+        let fake = StackForge::new(
+            forge,
+            &[
+                open_pr(1, "a", "main"),
+                open_pr(2, "b", "a"),
+                open_pr(6, "sibling", "a"),
+                open_pr(4, "d", "b"),
+                open_pr(3, "c", "b"),
+                open_pr(7, "e", "c"),
+            ],
+        );
+        let stack = fake.walk("b", None).unwrap().unwrap();
+        let numbers: Vec<u64> = stack.members.iter().map(|pr| pr.number).collect();
+        assert_eq!((numbers, stack.this), (vec![1, 2, 3, 7, 4], 1), "{forge:?}");
+        let child = &stack.members[2];
+        assert_eq!(
+            (child.head.as_str(), child.base.as_str(), child.state),
+            ("c", "b", PrState::InReview),
+            "{forge:?}: a child is read by the badge rule"
+        );
+        assert!(!fake.called(&stack_children_argv(forge, "a")), "{forge:?}");
+    }
+}
+
+#[test]
+fn stack_parents_stop_at_a_long_lived_or_the_default_base() {
+    for forge in FORGES {
+        let fake = StackForge::new(
+            forge,
+            &[
+                open_pr(1, "develop", "main"),
+                open_pr(2, "b", "develop"),
+                open_pr(3, "c", "b"),
+            ],
+        );
+        assert_eq!(chain(fake.walk("b", None)), (vec![2, 3], 0), "{forge:?}");
+        assert!(
+            !fake.called(&stack_list_argv(forge, "develop")),
+            "{forge:?}"
+        );
+
+        let fake = StackForge::new(
+            forge,
+            &[open_pr(1, "release", "main"), open_pr(2, "b", "release")],
+        );
+        assert_eq!(fake.walk("b", Some("release")), Ok(None), "{forge:?}");
+        assert!(
+            !fake.called(&stack_list_argv(forge, "release")),
+            "{forge:?}"
+        );
+        assert_eq!(chain(fake.walk("b", None)), (vec![1, 2], 1), "{forge:?}");
+    }
+}
+
+#[test]
+fn stack_lists_no_children_of_a_long_lived_or_the_default_head() {
+    for forge in FORGES {
+        let fake = StackForge::new(
+            forge,
+            &[open_pr(1, "develop", "main"), open_pr(2, "x", "develop")],
+        );
+        assert_eq!(fake.walk("develop", None), Ok(None), "{forge:?}");
+        assert_eq!(fake.calls.borrow().len(), 0, "{forge:?}");
+
+        let fake = StackForge::new(
+            forge,
+            &[open_pr(1, "release", "main"), open_pr(2, "x", "release")],
+        );
+        assert_eq!(fake.walk("release", Some("release")), Ok(None), "{forge:?}");
+        assert_eq!(fake.calls.borrow().len(), 0, "{forge:?}");
+        assert_eq!(
+            chain(fake.walk("release", None)),
+            (vec![1, 2], 0),
+            "{forge:?}"
+        );
+    }
+}
+
+#[test]
+fn stack_walk_ends_on_a_branch_cycle() {
+    for forge in FORGES {
+        let fake = StackForge::new(forge, &[open_pr(1, "a", "b"), open_pr(2, "b", "a")]);
+        assert_eq!(chain(fake.walk("a", None)), (vec![2, 1], 1), "{forge:?}");
+        // One parent lookup, one children list; the child #2 is seen.
+        let mut want = vec![stack_list_argv(forge, "b")];
+        if forge == Forge::GitLab {
+            want.push(gitlab_mr_argv(&gl_repo(), 2));
+        }
+        want.push(stack_children_argv(forge, "a"));
+        assert_eq!(fake.calls.borrow().clone(), want, "{forge:?}");
+    }
+}
+
+#[test]
+fn stack_drops_a_fork_child() {
+    for forge in FORGES {
+        let fake = StackForge::new(
+            forge,
+            &[
+                open_pr(1, "a", "main"),
+                fork_pr(9, "x", "a"),
+                open_pr(2, "b", "a"),
+            ],
+        );
+        assert_eq!(chain(fake.walk("a", None)), (vec![1, 2], 0), "{forge:?}");
+        assert!(!fake.called(&stack_list_argv(forge, "x")), "{forge:?}");
+        assert!(!fake.called(&stack_children_argv(forge, "x")), "{forge:?}");
+    }
+}
+
+#[test]
+fn stack_caps_its_parents_and_its_members() {
+    for forge in FORGES {
+        // 12 PRs in one chain: the walk from the top finds 10 parents.
+        let mut members = vec![open_pr(1, "b1", "main")];
+        members.extend((2..=12).map(|n| open_pr(n, &format!("b{n}"), &format!("b{}", n - 1))));
+        let fake = StackForge::new(forge, &members);
+        let want: Vec<u64> = (2..=12).collect();
+        assert_eq!(
+            chain(fake.walk("b12", None)),
+            (want, STACK_DEPTH_MAX),
+            "{forge:?}"
+        );
+        assert!(!fake.called(&stack_list_argv(forge, "b1")), "{forge:?}");
+
+        // 25 children: the stack keeps the PR and the first 19.
+        let mut members = vec![open_pr(1, "a", "main")];
+        members.extend((2..=26).map(|n| open_pr(n, &format!("c{n}"), "a")));
+        let fake = StackForge::new(forge, &members);
+        let (numbers, this) = chain(fake.walk("a", None));
+        assert_eq!(numbers.len(), STACK_MEMBERS_MAX, "{forge:?}");
+        assert_eq!((numbers, this), ((1..=20).collect(), 0), "{forge:?}");
+        assert!(fake.called(&stack_children_argv(forge, "c19")), "{forge:?}");
+        assert!(
+            !fake.called(&stack_children_argv(forge, "c20")),
+            "{forge:?}"
+        );
+        assert!(!fake.called(&stack_list_argv(forge, "c21")), "{forge:?}");
+    }
+}
+
+#[test]
+fn stack_walk_fails_on_any_failed_call_with_its_reason() {
+    let members = || {
+        [
+            open_pr(1, "a", "main"),
+            open_pr(2, "b", "a"),
+            open_pr(3, "c", "b"),
+        ]
+    };
+    for forge in FORGES {
+        let parent_fails = StackForge::new(forge, &members())
+            .answer(stack_list_argv(forge, "a"), Err(Some("boom".into())));
+        assert_eq!(
+            parent_fails.walk("b", None),
+            Err(Some("boom".into())),
+            "{forge:?}"
+        );
+
+        let children_fail =
+            StackForge::new(forge, &members()).answer(stack_children_argv(forge, "b"), Err(None));
+        assert_eq!(children_fail.walk("b", None), Err(None), "{forge:?}");
+
+        let bad_json = StackForge::new(forge, &members())
+            .answer(stack_children_argv(forge, "c"), Ok("not json".into()));
+        assert_eq!(bad_json.walk("b", None), Err(None), "{forge:?}");
+    }
+    let child_mr_fails = StackForge::new(Forge::GitLab, &members())
+        .answer(gitlab_mr_argv(&gl_repo(), 3), Err(Some("glab: 500".into())));
+    assert_eq!(
+        child_mr_fails.walk("b", None),
+        Err(Some("glab: 500".into()))
+    );
+}
+
+#[test]
+fn stack_is_none_without_a_parent_or_a_child() {
+    for forge in FORGES {
+        let alone = StackForge::new(forge, &[open_pr(1, "a", "main")]);
+        assert_eq!(alone.walk("a", None), Ok(None), "{forge:?}");
+        assert_eq!(
+            alone.calls.borrow().clone(),
+            vec![stack_children_argv(forge, "a")],
+            "{forge:?}"
+        );
+
+        // The base has no PR that counts.
+        let orphan = StackForge::new(forge, &[open_pr(1, "a", "gone")]);
+        assert_eq!(orphan.walk("a", None), Ok(None), "{forge:?}");
+    }
+    let pr = PullRequest::fixture(7, &gh_url(7), PrState::InReview);
+    let run = |_: &[String]| -> Answer { panic!("no CLI call expected") };
+    assert_eq!(lookup_stack(None, &pr, None, &run), Ok(None));
+    assert_eq!(
+        lookup_stack(Some("git@bitbucket.org:octo/demo.git"), &pr, None, &run),
+        Ok(None)
+    );
+}
+
+/// Copy every file of verify scenario set `set` into `dir`, as the verify
+/// driver's `scenario` command overlays sets.
+#[cfg(unix)]
+fn overlay_scenario_set(dir: &std::path::Path, set: &str) {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.agents/skills/verify-workspace-status/scenarios")
+        .join(set);
+    let status = std::process::Command::new("cp")
+        .arg("-R")
+        .arg(format!("{}/.", src.display()))
+        .arg(dir)
+        .status()
+        .expect("cp runs");
+    assert!(status.success(), "copy scenario set {set}");
+}
+
+/// Run `argv` through the fake `gh` / `glab` script of the same name, on
+/// the scenario files in `dir`. It goes through `env`, so the test process
+/// environment stays untouched.
+#[cfg(unix)]
+fn fake_forge_cli(dir: &std::path::Path, argv: &[String]) -> Answer {
+    let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fake-forge");
+    let mut full = vec![
+        "env".to_string(),
+        format!("WS_FAKE_FORGE_DIR={}", dir.display()),
+        scripts.join(&argv[0]).display().to_string(),
+    ];
+    full.extend_from_slice(&argv[1..]);
+    run_cli(&full, &live())
+}
+
+/// Every single-state verify scenario set that finds a PR also answers the
+/// child list the stack walk asks for that PR's head (`[]`), so the walk
+/// lands no chain instead of a `no scenario` failure.
+#[cfg(unix)]
+#[test]
+fn single_state_scenario_sets_answer_the_child_list_with_no_chain() {
+    const APP: &str = "https://github.com/acme/app.git";
+    const API: &str = "https://gitlab.com/acme/services/api.git";
+    const MERGER: &str = "https://github.com/acme/merger.git";
+    let states = [
+        "behind", "draft", "failed", "merged", "ready", "review", "running",
+    ];
+    let sets = states
+        .iter()
+        .map(|state| (format!("github-{state}"), APP, "feature/auth-refresh"))
+        .chain(
+            states
+                .iter()
+                .map(|state| (format!("gitlab-{state}"), API, "feature/rate-limit")),
+        )
+        .chain([
+            ("context".to_string(), APP, "feature/login-page"),
+            ("context".to_string(), MERGER, "feature/reconciliation"),
+        ]);
+    for (set, remote, branch) in sets {
+        let dir = crate::testutil::unique_dir("ws-scenario-children");
+        std::fs::create_dir_all(&dir).unwrap();
+        overlay_scenario_set(&dir, &set);
+        let run = |argv: &[String]| fake_forge_cli(&dir, argv);
+        let pr = found_pr(lookup(Some(remote), branch, &run));
+        assert_eq!(
+            lookup_stack(Some(remote), &pr, None, &run),
+            Ok(None),
+            "{set} {branch}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn stack_scenario_set_answers_both_chains_through_the_fake_forge() {
+    let dir = crate::testutil::unique_dir("ws-stack-scenario");
+    std::fs::create_dir_all(&dir).unwrap();
+    overlay_scenario_set(&dir, "prs-tab");
+    overlay_scenario_set(&dir, "stack");
+    let run = |argv: &[String]| fake_forge_cli(&dir, argv);
+    const APP: &str = "https://github.com/acme/app.git";
+    const API: &str = "https://gitlab.com/acme/services/api.git";
+    const MERGER: &str = "https://github.com/acme/merger.git";
+    for (remote, branch, want) in [
+        (APP, "feature/auth-refresh", (vec![6, 7, 8, 9], 1)),
+        (APP, "feature/login-page", (vec![6, 7, 8, 9], 2)),
+        (API, "feature/rate-limit", (vec![4, 5, 6], 1)),
+    ] {
+        let pr = found_pr(lookup(Some(remote), branch, &run));
+        assert_eq!(
+            chain(lookup_stack(Some(remote), &pr, None, &run)),
+            want,
+            "{branch}"
+        );
+    }
+    let merged = found_pr(lookup(Some(MERGER), "feature/reconciliation", &run));
+    assert_eq!(lookup_stack(Some(MERGER), &merged, None, &run), Ok(None));
+    for (remote, number) in [(APP, 6), (APP, 7), (APP, 9), (API, 4), (API, 5), (API, 6)] {
+        assert!(
+            matches!(
+                lookup_detail(remote, number, &run),
+                PrDetailLookup::Found(_)
+            ),
+            "detail of {remote} {number}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- lookup_detail ----

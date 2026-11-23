@@ -105,8 +105,8 @@ use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId
 use super::toast::{Toast, ToastMark, ToastTick};
 use super::tree::{
     fit_upstream_rewrite_text, highlight_focus_matches, painted_row_segments, pr_badge_kind,
-    pr_badge_role, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, PrBadge, PrMark,
-    PrTotals, SegRole, TextSeg, VisibleRow, PR_REF_MIN_TREE_COLS,
+    pr_badge_role, pr_stack_position_text, visible_window, workspace_trailing_fit, NodeKind,
+    NodeSegments, PrBadge, PrMark, PrTotals, SegRole, TextSeg, VisibleRow, PR_REF_MIN_TREE_COLS,
 };
 use super::tree_focus::TreeFocus;
 use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, UndercurlHit};
@@ -2923,8 +2923,9 @@ fn graph_pr_badges(state: &AppState) -> Vec<GraphPrBadge> {
 }
 
 /// The graph header chip: the checkout it describes, its mark, the columns
-/// of its `<glyph> <ref>` head (the PR icon hit and link), and the
-/// candidates for [`GraphWidget::header_chip`].
+/// of its `<glyph> <ref>` head (with the stack position of a stacked PR;
+/// the PR icon hit, whose ref is the link), and the candidates for
+/// [`GraphWidget::header_chip`].
 struct GraphPrChip {
     checkout: PathBuf,
     mark: PrMark,
@@ -2944,6 +2945,11 @@ const GRAPH_CHIP_LOOKUP_FAILED: &str = "lookup failed";
 /// state colour, the ref in the repo colour, `▸` dim, the next action bold.
 /// A stale PR paints every part muted. ASCII mode uses `>` for `▸`.
 ///
+/// A stacked PR ([`AppState::pr_stack`]) paints its position after the
+/// ref in every candidate (`◌ #8 ⧗2/3 draft  ▸ undraft`, ASCII `2/3`),
+/// muted, as part of the head; a last candidate drops it (`<glyph>
+/// <ref>`).
+///
 /// A failed lookup with no earlier answer
 /// ([`AppState::graph_header_lookup_failed`]) paints the failure mark:
 /// `! lookup failed`, then `!` alone, bold in the deleted colour, no ref.
@@ -2962,7 +2968,7 @@ fn graph_pr_chip(state: &AppState, now_unix: i64) -> Option<GraphPrChip> {
     // state colour.
     let ref_role = if stale { state_role } else { SegRole::Repo };
     let ref_text = pr.ref_text();
-    let head = vec![
+    let short_head = vec![
         Span::styled(glyph.to_string(), bold),
         Span::raw(" "),
         Span::styled(
@@ -2970,6 +2976,20 @@ fn graph_pr_chip(state: &AppState, now_unix: i64) -> Option<GraphPrChip> {
             Style::default().fg(seg_role_color(ref_role, palette)),
         ),
     ];
+    // A stacked PR: its position follows the ref, muted, inside the head.
+    let position = state.pr_stack(&checkout).map(|stack| {
+        let (position, len) = stack.position();
+        pr_stack_position_text(state.ascii, position, len)
+    });
+    let mut head = short_head.clone();
+    if let Some(position) = &position {
+        head.extend([Span::raw(" "), Span::styled(position.clone(), muted)]);
+    }
+    let head_cols = 2
+        + UnicodeWidthStr::width(ref_text.as_str())
+        + position
+            .as_deref()
+            .map_or(0, |text| 1 + UnicodeWidthStr::width(text));
     let labelled = [
         head.clone(),
         vec![Span::raw(" "), Span::styled(pr.state.label(), state_style)],
@@ -2998,11 +3018,13 @@ fn graph_pr_chip(state: &AppState, now_unix: i64) -> Option<GraphPrChip> {
     }
     candidates.push(Line::from(labelled));
     candidates.push(Line::from(head));
+    if position.is_some() {
+        candidates.push(Line::from(short_head));
+    }
     Some(GraphPrChip {
         checkout,
         mark: PrMark::State(pr.state),
-        head_width: u16::try_from(2 + UnicodeWidthStr::width(ref_text.as_str()))
-            .unwrap_or(u16::MAX),
+        head_width: u16::try_from(head_cols).unwrap_or(u16::MAX),
         candidates,
     })
 }
@@ -8167,8 +8189,8 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                         let room = inner_width.saturating_sub(x);
                         if room > 0 {
                             let shown = fit_with_ellipsis(value, room);
-                            if *link {
-                                line_links[index] = Some((x, visible_width(&shown), value.clone()));
+                            if let Some(url) = link {
+                                line_links[index] = Some((x, visible_width(&shown), url.clone()));
                             }
                             let mut head = (*bold).min(shown.len());
                             while !shown.is_char_boundary(head) {

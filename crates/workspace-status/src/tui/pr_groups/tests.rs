@@ -23,6 +23,8 @@ fn entry(
         repo: repo.into(),
         pr,
         default_branch: None,
+        checked_out: true,
+        stack_position: None,
     }
 }
 
@@ -940,6 +942,174 @@ fn rows_that_stack_on_each_other_in_a_loop_still_all_show() {
     b.pr.base = "branch-a".into();
     let groups = group_prs(vec![a, b]);
     assert_eq!(numbers(&groups[0]), vec![1, 2]);
+}
+
+// ---- stack members ----------------------------------------------
+
+/// `acme/app` PR `number` from `head` into `base`, as a stack walk lists it.
+fn member(number: u64, head: &str, base: &str, state: PrState) -> PullRequest {
+    let mut pr = PullRequest::fixture(number, &format!("{APP}/{number}"), state);
+    pr.head = head.into();
+    pr.base = base.into();
+    pr
+}
+
+/// The chain `#6 → #7 → #8 → #9` of `acme/app`, `#6` into `main`.
+fn chain() -> Vec<PullRequest> {
+    vec![
+        member(6, "feature/token-store", "main", PrState::InReview),
+        member(
+            7,
+            "feature/auth-refresh",
+            "feature/token-store",
+            PrState::Ready,
+        ),
+        member(
+            8,
+            "feature/login-page",
+            "feature/auth-refresh",
+            PrState::CiFailed,
+        ),
+        member(
+            9,
+            "feature/login-copy",
+            "feature/login-page",
+            PrState::Draft,
+        ),
+    ]
+}
+
+/// The checked-out entry of `pr` in checkout `/ws/<name>`.
+fn checked_out(name: &str, pr: &PullRequest) -> PrEntry {
+    PrEntry {
+        checkout: PathBuf::from(format!("/ws/{name}")),
+        repo: "acme/app".into(),
+        pr: pr.clone(),
+        default_branch: Some("main".into()),
+        checked_out: true,
+        stack_position: None,
+    }
+}
+
+/// A stack position: `(position, length)`, 1-based.
+type Position = Option<(usize, usize)>;
+
+/// A source over `stack` for checkout `checkout`.
+fn source<'a>(checkout: &'a Path, stack: &'a PrStack) -> StackSource<'a> {
+    StackSource {
+        checkout,
+        repo: "acme/app",
+        default_branch: Some("main"),
+        stack,
+    }
+}
+
+#[test]
+fn stack_members_no_checkout_has_are_listed_in_chain_order() {
+    // `/ws/app` has #7, `/ws/app-wt` has #8; the walk found #6 and #9.
+    let members = chain();
+    let of_seven = PrStack {
+        members: members.clone(),
+        this: 1,
+    };
+    let of_eight = PrStack {
+        members: members.clone(),
+        this: 2,
+    };
+    let (app, wt) = (Path::new("/ws/app"), Path::new("/ws/app-wt"));
+    let entries = vec![
+        checked_out("app", &members[1]),
+        checked_out("app-wt", &members[2]),
+    ];
+    let (entries, listed_by) =
+        with_stack_members(entries, &[source(app, &of_seven), source(wt, &of_eight)]);
+
+    let flags: Vec<(u64, bool, Position)> = entries
+        .iter()
+        .map(|entry| (entry.pr.number, entry.checked_out, entry.stack_position))
+        .collect();
+    assert_eq!(
+        flags,
+        vec![
+            (7, true, Some((2, 4))),
+            (8, true, Some((3, 4))),
+            (6, false, Some((1, 4))),
+            (9, false, Some((4, 4))),
+        ],
+        "one entry per distinct PR: the two stacks share every member"
+    );
+    let six = &entries[2];
+    assert_eq!(six.checkout, app, "a stack-only PR takes the first source");
+    assert_eq!(six.default_branch.as_deref(), Some("main"));
+    assert_eq!(
+        listed_by.get(&members[0].url),
+        Some(&vec![app.to_path_buf(), wt.to_path_buf()]),
+        "both stacks list #6"
+    );
+    assert_eq!(listed_by.get(&members[1].url), None, "#7 is checked out");
+
+    let groups = group_prs(entries);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(numbers(&groups[0]), vec![6, 7, 8, 9], "chain order");
+    let rows: Vec<(Option<&str>, bool, Position)> = groups[0]
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.stacked_on.as_ref().map(|base| base.pr_ref.as_str()),
+                row.checked_out,
+                row.stack_position,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (None, false, Some((1, 4))),
+            (Some("#6"), true, Some((2, 4))),
+            (Some("#7"), true, Some((3, 4))),
+            (Some("#8"), false, Some((4, 4))),
+        ]
+    );
+    assert_eq!(
+        groups[0].rows[1].next_action,
+        Some(NextAction::MergeBaseFirst("#6".into())),
+        "a parent that no checkout has still comes first"
+    );
+}
+
+#[test]
+fn a_stack_position_comes_from_the_checkouts_own_stack_first() {
+    // `/ws/other` still holds an older two-member stack around #7.
+    let members = chain();
+    let old = PrStack {
+        members: vec![members[1].clone(), members[2].clone()],
+        this: 0,
+    };
+    let own = PrStack {
+        members: members.clone(),
+        this: 1,
+    };
+    let (other, app) = (Path::new("/ws/other"), Path::new("/ws/app"));
+    let entries = vec![checked_out("app", &members[1])];
+    let (entries, _) = with_stack_members(entries, &[source(other, &old), source(app, &own)]);
+    assert_eq!(entries[0].stack_position, Some((2, 4)));
+    let eight = entries.iter().find(|entry| entry.pr.number == 8).unwrap();
+    assert_eq!(
+        (eight.checkout.as_path(), eight.stack_position),
+        (other, Some((2, 2))),
+        "a stack-only PR reads the first source that lists it"
+    );
+}
+
+#[test]
+fn no_stack_adds_nothing_and_marks_no_position() {
+    let members = chain();
+    let entries = vec![checked_out("app", &members[1])];
+    let (entries, listed_by) = with_stack_members(entries, &[]);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].stack_position, None);
+    assert!(listed_by.is_empty());
 }
 
 #[test]

@@ -30,7 +30,7 @@ fn enter_opens(tui: &mut PtySession, forge: &FakeForge, ack: &str, want_url: &st
 /// Proof: Enter on `#40` records `https://github.com/acme/app/pull/40` and
 /// says `opened PR #40`; Enter on `!31` records the merge request URL
 /// `https://gitlab.com/acme/services/api/-/merge_requests/31` and says
-/// `opened PR #31`. Each Enter records exactly one open. An Enter that
+/// `opened PR !31`. Each Enter records exactly one open. An Enter that
 /// acted on the header's PR or on the tree cursor's checkout would open
 /// `!31` first, or the PR of `api-cache`.
 #[test]
@@ -49,5 +49,5 @@ fn pty_prs_tab_enter_opens_the_pr_on_both_forges() {
     prs_move_to(&mut tui, "#40");
     enter_opens(&mut tui, &forge, "opened PR #40", &github_pr_url(40));
     prs_move_to(&mut tui, "!31");
-    enter_opens(&mut tui, &forge, "opened PR #31", &gitlab_mr_url(31));
+    enter_opens(&mut tui, &forge, "opened PR !31", &gitlab_mr_url(31));
 }

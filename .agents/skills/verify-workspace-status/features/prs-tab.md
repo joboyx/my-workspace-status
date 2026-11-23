@@ -1,6 +1,6 @@
 # PRs tab
 
-`gp` (or the palette row `PRs tab`, or a click on the workspace PR total) opens the PRs tab: every PR of the checked-out branches in one list, grouped by ticket key, beside a detail pane. A second `gp` focuses it; `Ctrl-w` closes it. On the tab: `j` / `k` / `gg` / `G` move, Enter opens the PR, `gc` opens its CI page, `o` shows its checkout in the Workspace tab, `z` folds the group under the cursor, `Z` folds every finished group, `r` looks every PR up again, `y` copies the URL, and `Tab` switches list and detail in a frame under 100 columns (there the move keys scroll the shown detail). The list and the detail each paint a vertical scrollbar in their last column while their lines overflow; the wheel over the detail scrolls it, and another PR starts its detail at the top. Reference: `docs/tui-rust.md`, **PRs tab**; the title command is `WS_STATUS_PR_TITLE_CMD` in `docs/configuration.md`.
+`gp` (or the palette row `PRs tab`, or a click on the workspace PR total) opens the PRs tab: every PR of the checked-out branches in one list, plus each member of their stacked PR chains that no checkout has (a stack-only row), grouped by ticket key, beside a detail pane. A second `gp` focuses it; `Ctrl-w` closes it. On the tab: `j` / `k` / `gg` / `G` move, Enter opens the PR, `gc` opens its CI page, `o` shows its checkout in the Workspace tab, `z` folds the group under the cursor, `Z` folds every finished group, `r` looks every PR up again, `y` copies the URL, and `Tab` switches list and detail in a frame under 100 columns (there the move keys scroll the shown detail). The list and the detail each paint a vertical scrollbar in their last column while their lines overflow; the wheel over the detail scrolls it, and another PR starts its detail at the top. Reference: `docs/tui-rust.md`, **PRs tab**; the title command is `WS_STATUS_PR_TITLE_CMD` in `docs/configuration.md`.
 
 A build without the PRs tab (`gp` opens nothing, no `PRs <n>` tab label) cannot pass: report SKIP and name the missing piece.
 
@@ -34,7 +34,7 @@ The `prs-tab` set gives each seeded branch a PR whose title carries a ticket key
 | `services/api`, `feature/rate-limit` | `!5` | CI running | `[ABC-125] Rate limit the public API` | `ABC-125` (`[KEY]` prefix) |
 | `merger` and its worktree, `feature/reconciliation` | `#12` | merged | `ABC-120: Reconcile billing runs` | `ABC-120` (`KEY:` prefix) |
 
-`lib` has no forge remote and no PR. The tab lists 4 PRs: `#12` shows from two checkouts but is one PR. The `wait` texts below are ASCII mode (the driver default) except PT10.
+`lib` has no forge remote and no PR. The tab lists 4 PRs: `#12` shows from two checkouts but is one PR. The set also answers the stack walk: the open PRs that target `feature/auth-refresh` are `[#8]`, and every other head has none, so `#7` and `#8` are a chain of two (`1/2`, `2/2 after #7`). `gh pr list --head main` answers no PR, for PT15, where the `app` primary checkout sits on `main`. The `wait` texts below are ASCII mode (the driver default) except PT10.
 
 ## PT1 `gp` opens the tab, groups in order
 
@@ -48,9 +48,9 @@ $V capture "$RUN" groups | in_order 'v ABC-123 · > fix CI #7' 'x #7   acme/app'
 $V wait --cursor "$RUN" 'v ABC-123'
 ```
 
-Expect: the tab strip ` Workspace │ PRs 4 [✗]`; the list pane `prs` beside the detail pane `PR`. The headers read `ABC-123 · > fix CI #7`, `ABC-125 · > wait for CI !5`, `ABC-120 · m merged`; only the first header ends in `checked just now`. Rows show the title without its key and commit type (`Refresh auth tokens before expiry`, `Add the login page`, `Rate limit the public API`, `Reconcile billing runs`), a CI cell (`CI x`, `CI ok`, `CI ..`, `CI -`), and the state label; the `#8` row ends in `in review   after #7`. The detail starts `x #7 fix(ABC-123): Refresh auth tokens` (the full title, cut at the pane edge): a header shows the PR its next action names.
+Expect: the tab strip ` Workspace │ PRs 4 [✗]`; the list pane `prs` beside the detail pane `PR`. The headers read `ABC-123 · > fix CI #7`, `ABC-125 · > wait for CI !5`, `ABC-120 · m merged`; only the first header ends in `checked just now`. Rows show the title without its key and commit type (`Refresh auth tokens before expiry`, `Add the login page`, `Rate limit the public API`, `Reconcile billing runs`), a CI cell (`CI x`, `CI ok`, `CI ..`, `CI -`), and the state label; the `#7` row ends in `CI failed   1/2` and the `#8` row in `in review   2/2 after #7`. The detail starts `x #7 fix(ABC-123): Refresh auth tokens` (the full title, cut at the pane edge): a header shows the PR its next action names.
 
-**PASS:** `in_order` prints PASS, the capture shows `PRs 4`, `after #7` on the `#8` row, and `checked ` on the first header only, and the cursor starts on the `ABC-123` header. The group order follows what the author must do (CI failed, then waiting, then finished), not the key: key order would put `ABC-120` first.
+**PASS:** `in_order` prints PASS, the capture shows `PRs 4`, `2/2 after #7` on the `#8` row, and `checked ` on the first header only, and the cursor starts on the `ABC-123` header. The group order follows what the author must do (CI failed, then waiting, then finished), not the key: key order would put `ABC-120` first.
 
 ## PT2 The detail follows the cursor
 
@@ -87,7 +87,7 @@ top && walk '#7   acme'
 $V keys "$RUN" Enter && $V wait "$RUN" 'opened PR #7'
 $V keys "$RUN" g c && $V wait "$RUN" 'opened CI for #7'
 walk '#8   acme' 'v ABC-125' '!5   acme'
-$V keys "$RUN" Enter && $V wait "$RUN" 'opened PR #5'
+$V keys "$RUN" Enter && $V wait "$RUN" 'opened PR !5'
 $V keys "$RUN" g c && $V wait "$RUN" 'opened CI for !5'
 opened_is https://gitlab.com/acme/services/api/-/pipelines/9002   # the recorder can lag the status line
 cat "$RUN/opened.log"
@@ -198,7 +198,7 @@ $V keys "$RUN" g p && $V wait "$RUN" 'ABC-120 · ✓ merged'
 $V capture "$RUN" nerd
 ```
 
-**PASS:** the capture shows the headers `▾ ABC-123 · ▸ fix CI #7` and `▾ ABC-120 · ✓ merged`, the rows `✕ #7`, `○ #8`, `◐ !5`, `✓ #12`, the CI cells `CI ✕`, `CI ✓`, `CI …`, `CI —`, and the stack mark `⧗ after #7`.
+**PASS:** the capture shows the headers `▾ ABC-123 · ▸ fix CI #7` and `▾ ABC-120 · ✓ merged`, the rows `✕ #7`, `○ #8`, `◐ !5`, `✓ #12`, the CI cells `CI ✕`, `CI ✓`, `CI …`, `CI —`, and the stack marks `⧗ 1/2` on `#7` and `⧗ 2/2 after #7` on `#8`.
 
 ## PT11 Update branch in the detail
 
@@ -215,6 +215,106 @@ $V capture "$RUN" prs-behind
 Expect: these sets carry no ticket key, so the four PRs land in one group, and its header reads `v other` with no next action. The cursor starts on that header, and the detail shows `#7`: the title `P #7 Refresh auth tokens before expiry`, then `state    OPEN · APPROVED` and `next     > update branch`. The rows read `P #7   acme/app`, `P #8   acme/app`, `m #12  acme/merger` and `P !5   acme/servic…`, each `in review` except `#12`.
 
 **PASS:** the capture shows `PRs 4`, the `v other` header, and the detail lines `state    OPEN · APPROVED` and `next     > update branch`. A group header with a ticket key names the action (`ABC-140 · > update branch #7`): the PTY test `pty_pr_update_branch_next_action_on_both_forges` checks that on both forges.
+
+## PT12 The whole stacked chain, in order, with the not-checked-out marks
+
+The `stack` set (an overlay on `prs-tab`, `SKILL.md`, **Fake forge**) adds chain members that no checkout has, in both directions: GitHub `#6` (root, `feature/token-store`) and the draft `#9` (`feature/login-copy`, on `#8`), GitLab `!4` (root, `feature/quota-store`) and `!6` (`feature/rate-limit-docs`, on `!5`). The tab lists them as stack-only rows beside the checked-out PRs.
+
+```bash
+fresh prs-tab stack -- --fake-forge "$FORGE"
+$V wait --regex "$RUN" '#8 3/4 P($|[^[:alnum:]])' && $V wait --regex "$RUN" '!5 2/3 r($|[^[:alnum:]])' && $V wait --regex "$RUN" '#12 m($|[^[:alnum:]])'
+$V keys "$RUN" g p
+$V wait "$RUN" 'PRs 8' && $V wait "$RUN" 'v ABC-120 · m merged'
+SCR=$($V capture "$RUN" stack-chain)
+in_order <<<"$SCR" 'v ABC-123 · > fix CI #7' 'P #6   acme/app' 'x #7   acme/app' 'P #8   acme/app' 'd #9   acme/app' \
+  'v ABC-125 · > get review !4' 'P !4   acme/servic…' 'r !5   acme/servic…' 'P !6   acme/servic…' 'v ABC-120 · m merged' 'm #12  acme/merger'
+n=0
+for row in '#6 .*in review   1/4 · no checkout' '#7 .*CI failed   2/4 after #6  ' '#8 .*in review   3/4 after #7  ' \
+  '#9 .*draft       4/4 after #8 · no checkout' '!4 .*in review   1/3 · no checkout' '!5 .*CI running  2/3 after !4  ' \
+  '!6 .*in review   3/3 after !5 · no checkout'; do
+  grep -qE -- "$row" <<<"$SCR" && n=$((n + 1)) || echo "FAIL row /$row/"
+done
+echo "stack rows: $n of 7"
+```
+
+Expect: the label `PRs 8` (the 4 PRs of `prs-tab` plus the 4 stack-only rows; the workspace row still says `3 PRs`, the checked-out ones). The `ABC-123` group lists `#6`, `#7`, `#8`, `#9` (root first, each PR after its base), the `ABC-125` group `!4`, `!5`, `!6`, and its header names the root's action (`> get review !4`). Each row ends in its position and base; a stack-only row ends in ` · no checkout`, and its reviews cell is `-` (no detail fetch). The `.ansi` capture paints the ref and title of a stack-only row muted.
+
+**PASS:** `in_order` prints PASS and the loop prints `stack rows: 7 of 7` with no FAIL line. A build that only lists checked-out PRs shows `PRs 4` with `#7` and `#8` alone in `ABC-123`. PTY proof: `pty_prs_tab_lists_the_whole_stack_on_both_forges`.
+
+## PT13 The detail lists the chain
+
+The cursor is on the `ABC-123` header after PT12 (its detail shows `#7`, the PR its next action names).
+
+```bash
+top
+$V capture "$RUN" stack-detail-7 | in_order 'stack      1/4 P #6 in review · not checked out' '> 2/4 x #7 CI failed' \
+  '3/4 P #8 in review' '4/4 d #9 draft · not checked out' 'checkout app · primary'
+walk '#6   acme'
+$V wait "$RUN" 'checkout none (not checked out)'
+$V capture "$RUN" stack-detail-6 | in_order 'P #6 feat(ABC-123): Store auth tokens' 'next     > get review' 'stack    > 1/4 P #6 in review · not checked out' \
+  '2/4 x #7 CI failed' 'url      https://github.com/acme/app/pull/6' 'checkout none (not checked out)' 'repo     acme/app' \
+  'Enter  Open PR' 'y      Copy URL'
+$V capture "$RUN" stack-detail-6-actions | grep -qF 'Show in tree' && echo "FAIL #6 lists Show in tree" || echo "PASS #6 has no Show in tree"
+```
+
+Expect: the `#7` detail has the `stack` label on its first chain line and one line per member in chain order, `#7` marked `>`, ` · not checked out` on `#6` and `#9` only. On the stack-only `#6` the detail shows the badge-level lines (`next`, `stack` with `#6` marked, `url`), no `checks` or `checked` line, then `checkout none (not checked out)` and `repo     acme/app`, and the actions `Enter  Open PR`, the CI line, and `y      Copy URL` with no `o      Show in tree` line (a stack-only row has no checkout to show).
+
+**PASS:** both `in_order` calls print PASS, and the last line prints `PASS #6 has no Show in tree`.
+
+## PT14 Enter and `y` on a stack-only row act on its PR; `o` and `gh` refuse
+
+The cursor is on `#6` after PT13.
+
+```bash
+$V keys "$RUN" Enter && $V wait "$RUN" 'opened PR #6'
+opened_is https://github.com/acme/app/pull/6
+$V keys "$RUN" o && $V wait "$RUN" '#6 is not checked out' && $V wait --cursor "$RUN" '#6   acme'
+walk '#7   acme' '#8   acme' '#9   acme' 'v ABC-125' '!4   acme' '!5   acme' '!6   acme'
+$V keys "$RUN" Enter && $V wait "$RUN" 'opened PR !6'
+opened_is https://gitlab.com/acme/services/api/-/merge_requests/6
+$V keys "$RUN" y && $V wait "$RUN" 'copied'
+$V keys "$RUN" g h && $V wait "$RUN" '!6 is not checked out'
+$V capture "$RUN" stack-only-actions
+cat "$RUN/opened.log"
+```
+
+Expect `opened.log` to end in these two lines, in this order:
+
+```text
+https://github.com/acme/app/pull/6
+https://gitlab.com/acme/services/api/-/merge_requests/6
+```
+
+**PASS:** each wait passes: Enter opens the stack-only PR on both forges with no lookup (`opened PR #6`, `opened PR !6`, and the two URLs above), `y` acknowledges `copied` (the URL goes out through OSC 52; the PTY test reads it), `o` says `#6 is not checked out` and the PRs tab stays with the cursor on `#6`, and `gh` says `!6 is not checked out` and pins no popover. PTY proof: `pty_prs_tab_lists_the_whole_stack_on_both_forges`.
+
+## PT15 A parent PR that no checkout has (the `app` primary on `main`)
+
+The repro of the stack walk: the worktree `app/.worktrees/feat-login` is on `feature/login-page` (`#8`, base `feature/auth-refresh` = `#7`), and the `app` primary checkout is moved to `main`, so no checkout has `#7`. Only the `prs-tab` set is needed. This block drives `wsctl` (run it with `bash -e` from the repository root; it does not use the prelude).
+
+```bash
+WS=.agents/skills/verify-workspace-status/scripts/wsctl
+V=scripts/verify-tui.sh
+FORGE=$(mktemp -d "${TMPDIR:-/tmp}/ws-forge.XXXXXX")
+$V scenario --reset "$FORGE" prs-tab
+SEED=$($WS start --fake-forge "$FORGE" | jq -r .run)   # seeds the demo workspace
+$WS stop
+git -C "$SEED/workspace/app" checkout -f -q main       # the parent branch has no checkout now
+RUN=$($WS start --no-build --workspace "$SEED/workspace" --fake-forge "$FORGE" | jq -r .run)
+trap '$WS stop >/dev/null' EXIT
+$WS doctor
+$WS wait --regex '#8 2/2 P($|[^[:alnum:]])'
+$WS key --chord g p
+$WS wait 'PRs 4'
+$WS wait 'v ABC-120 · m merged'
+SCR=$($WS snap --name parent-not-checked-out --raw)
+grep -qE '#7 .*CI failed   1/2 · no checkout' <<<"$SCR" && grep -qE '#8 .*in review   2/2 after #7  ' <<<"$SCR" &&
+  grep -qF 'checkout none (not checked out)' <<<"$SCR" && echo "PASS #7 and #8 listed in chain order"
+$V calls "$RUN" | grep -F -- '--head feature/auth-refresh'
+```
+
+Expect: the tree row `& main` has no badge and the worktree row `L feature/login-page` ends in `#8 2/2 P`; the workspace row says `3 PRs`. On the tab: `PRs 4`, the `ABC-123` header `> fix CI #7`, the rows `x #7 … CI failed   1/2 · no checkout` then `P #8 … in review   2/2 after #7`, and the detail of `#7` (the PR the header names) with `stack    > 1/2 x #7 CI failed · not checked out`, `2/2 P #8 in review` and `checkout none (not checked out)`. The forge calls hold a `gh pr list … --head feature/auth-refresh` line (the walk's parent lookup) and a `--head main` line that answers no PR.
+
+**PASS:** the snap line prints PASS and the last command prints a `--head feature/auth-refresh` call. A build without the stack walk shows `PRs 3`, `#8` alone in `ABC-123` with no `after #7`, no `stack` line, and no `--head feature/auth-refresh` call. PTY proof: `pty_prs_tab_lists_a_parent_pr_no_checkout_has`.
 
 Stop the last run when you are done (`stop_run`, or `$V stop <run dir>`).
 

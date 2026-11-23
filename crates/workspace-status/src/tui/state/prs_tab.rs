@@ -5,9 +5,12 @@
 //! each paint and key ([`AppState::prs_view`]) and keeps only the view
 //! state in [`PrsTab`]: the cursor line by identity, the folds the user
 //! set, and the narrow layout's list / detail toggle. One PR seen from
-//! several checkouts is one row; the detail lists every checkout. Keys act
-//! on the focused PR through the paths the badge keys use
-//! ([`AppState::run_pr_action_on_checkout`]). Git writes refuse with
+//! several checkouts is one row; the detail lists every checkout. Each
+//! member of a checkout's stack that no visible checkout has is a
+//! stack-only row too ([`with_stack_members`]). Keys act on the focused PR
+//! through the paths the badge keys use
+//! ([`AppState::run_pr_action_on_checkout`]); on a stack-only row they act
+//! on its URL and CI link with no lookup. Git writes refuse with
 //! [`PRS_TAB_READ_ONLY`].
 //!
 //! Group titles come from the title command on a worker
@@ -25,10 +28,13 @@ use super::super::action::{Action, Effect};
 use super::super::drill::DrillView;
 use super::super::popover::IconTarget;
 use super::super::pr_groups::{
-    finished_start_folded, group_prs, GroupHeadline, PrEntry, PrGroup, PrRow, TitleCache,
+    finished_start_folded, group_prs, with_stack_members, GroupHeadline, PrEntry, PrGroup, PrRow,
+    StackSource, TitleCache,
 };
 use super::super::pr_status::PrState;
-use super::super::pull_request::{parse_remote, NO_PR_FOR_ROW, PR_LOOKUP_RUNNING};
+use super::super::pull_request::{
+    is_web_url, no_ci_status, parse_remote, PrPage, PullRequest, NO_PR_FOR_ROW, PR_LOOKUP_RUNNING,
+};
 use super::super::selection::TextSelection;
 use super::super::split::{SplitDrag, SplitHit};
 use super::super::status::StatusMessage;
@@ -108,8 +114,11 @@ pub(crate) struct PrsView {
     /// Index of the cursor line in [`Self::lines`]; `None` when empty.
     pub(crate) cursor: Option<usize>,
     /// Checkouts that show each PR, by PR URL, in snapshot order. The
-    /// first one is the row's checkout.
+    /// first one is the row's checkout. A stack-only row has no entry.
     pub(crate) checkouts: HashMap<String, Vec<PathBuf>>,
+    /// Checkouts whose stack lists each stack-only PR, by PR URL
+    /// ([`with_stack_members`]). The first one is the row's checkout.
+    pub(crate) listed_by: HashMap<String, Vec<PathBuf>>,
     /// One line per failing forge CLI and host
     /// ([`AppState::pr_lookup_error_lines`]).
     pub(crate) errors: Vec<String>,
@@ -158,11 +167,57 @@ impl PrsView {
     }
 
     /// Every checkout that shows the PR of `row`, the row's own first.
+    /// Empty for a stack-only row ([`PrRow::checked_out`] false).
     pub(crate) fn checkouts_of<'a>(&'a self, row: &'a PrRow) -> &'a [PathBuf] {
+        if !row.checked_out {
+            return &[];
+        }
         self.checkouts
             .get(&row.pr.url)
             .map_or(std::slice::from_ref(&row.checkout), Vec::as_slice)
     }
+
+    /// Every checkout whose stack lists the stack-only PR of `row`, the
+    /// row's own first. Empty for a checked-out row.
+    pub(crate) fn listed_by<'a>(&'a self, row: &'a PrRow) -> &'a [PathBuf] {
+        if row.checked_out {
+            return &[];
+        }
+        self.listed_by
+            .get(&row.pr.url)
+            .map_or(std::slice::from_ref(&row.checkout), Vec::as_slice)
+    }
+}
+
+/// What [`AppState::pr_entries`] builds: the entries for [`group_prs`],
+/// and the checkouts of each PR by URL.
+struct PrsEntries {
+    /// One entry per listed PR.
+    entries: Vec<PrEntry>,
+    /// [`PrsView::checkouts`].
+    checkouts: HashMap<String, Vec<PathBuf>>,
+    /// [`PrsView::listed_by`].
+    listed_by: HashMap<String, Vec<PathBuf>>,
+}
+
+/// The PR the keys of the PRs tab act on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PrsTarget {
+    /// The PR of this checkout.
+    Checkout(PathBuf),
+    /// A stack member no visible checkout has, and the checkouts whose
+    /// stack lists it.
+    StackOnly {
+        /// The member as the stack walk found it.
+        pr: PullRequest,
+        /// [`PrsView::listed_by`] of its row.
+        listed_by: Vec<PathBuf>,
+    },
+}
+
+/// Status line when `o` asks for the checkout of a stack-only PR `pr_ref`.
+pub(crate) fn not_checked_out_status(pr_ref: &str) -> String {
+    format!("{pr_ref} is not checked out")
 }
 
 /// The cursor line of `view` for `tab`: the line [`PrsTab::cursor`] names;
@@ -223,11 +278,12 @@ impl AppState {
         self.tabs.active_prs().is_some()
     }
 
-    /// Strip labels in paint order: the PRs tab counts the PRs it lists
-    /// (distinct PRs, [`Self::pr_totals`]).
+    /// Strip labels in paint order: the PRs tab counts the rows it lists
+    /// ([`Self::pr_entries`]: distinct PRs, stack members no checkout has
+    /// included).
     pub(crate) fn tab_labels(&self) -> Vec<String> {
         let listed = if self.tabs.find_prs().is_some() {
-            self.pr_totals().prs
+            self.pr_entries().entries.len()
         } else {
             0
         };
@@ -235,50 +291,79 @@ impl AppState {
     }
 
     /// One [`PrEntry`] per distinct PR whose badge shows on a visible
-    /// checkout, in snapshot order, and the checkouts that show each PR (by
-    /// URL). The entry takes the first checkout; its repository is the
-    /// forge path of the remote (`acme/app`), and its default branch the
-    /// checkout's configured one.
-    fn pr_entries(&self) -> (Vec<PrEntry>, HashMap<String, Vec<PathBuf>>) {
+    /// checkout, in snapshot order, then one per stack member that no
+    /// visible checkout has ([`with_stack_members`]); the checkouts that
+    /// show each PR, and the checkouts whose stack lists each stack-only
+    /// PR (by URL). The entry takes the first checkout; its repository is
+    /// the forge path of the remote (`acme/app`), and its default branch
+    /// the one of the stack rule ([`Self::pr_stack_default_branch`]).
+    fn pr_entries(&self) -> PrsEntries {
         let mut entries = Vec::new();
         let mut checkouts: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        let mut sources = Vec::new();
         for row in self.pr_rows() {
             let path = Path::new(&row.repo);
             let Some(pr) = self.pull_request_for(path) else {
                 continue;
             };
-            let seen = checkouts.entry(pr.url.clone()).or_default();
-            seen.push(path.to_path_buf());
-            if seen.len() > 1 {
-                continue;
-            }
+            let default_branch = self.pr_stack_default_branch(path);
             let repo = self
                 .pr_cache
                 .remote_for(path)
                 .and_then(parse_remote)
                 .map_or_else(|| row.repo.clone(), |repo| repo.path);
+            if let Some(stack) = self.pr_stack(path) {
+                sources.push((path, repo.clone(), default_branch, stack));
+            }
+            let seen = checkouts.entry(pr.url.clone()).or_default();
+            seen.push(path.to_path_buf());
+            if seen.len() > 1 {
+                continue;
+            }
             entries.push(PrEntry {
                 checkout: path.to_path_buf(),
                 repo,
                 pr: pr.clone(),
-                default_branch: row.default_branch_override.clone(),
+                default_branch: default_branch.map(str::to_string),
+                checked_out: true,
+                stack_position: None,
             });
         }
-        (entries, checkouts)
+        let sources: Vec<StackSource<'_>> = sources
+            .iter()
+            .map(|(checkout, repo, default_branch, stack)| StackSource {
+                checkout,
+                repo,
+                default_branch: *default_branch,
+                stack,
+            })
+            .collect();
+        let (entries, listed_by) = with_stack_members(entries, &sources);
+        PrsEntries {
+            entries,
+            checkouts,
+            listed_by,
+        }
     }
 
-    /// The first checkout of every PR the PRs tab lists.
+    /// The first checkout of every checked-out PR the PRs tab lists (a
+    /// stack-only row has none, and gets no detail fetch).
     pub(super) fn prs_listed_checkouts(&self) -> Vec<PathBuf> {
         self.pr_entries()
-            .0
+            .entries
             .into_iter()
+            .filter(|entry| entry.checked_out)
             .map(|entry| entry.checkout)
             .collect()
     }
 
     /// The view of `tab` at `now`.
     fn build_prs_view(&self, tab: &PrsTab, now: Instant) -> PrsView {
-        let (entries, checkouts) = self.pr_entries();
+        let PrsEntries {
+            entries,
+            checkouts,
+            listed_by,
+        } = self.pr_entries();
         let groups = group_prs(entries);
         let fold_default = finished_start_folded(&groups);
         let mut lines = Vec::new();
@@ -301,6 +386,7 @@ impl AppState {
             lines,
             cursor: None,
             checkouts,
+            listed_by,
             errors: self.pr_lookup_error_lines(),
             checked: None,
             lookups: self.pr_lookup_progress(),
@@ -315,7 +401,10 @@ impl AppState {
         let mut open_oldest: Option<Instant> = None;
         let mut newest: Option<Instant> = None;
         let mut stale = false;
-        for row in view.groups.iter().flat_map(|group| &group.rows) {
+        // A stack-only row is as fresh as the checkout whose stack lists
+        // it, which is listed too.
+        let rows = view.groups.iter().flat_map(|group| &group.rows);
+        for row in rows.filter(|row| row.checked_out) {
             let Some(at) = self.pr_checked_at(&row.checkout) else {
                 continue;
             };
@@ -351,11 +440,22 @@ impl AppState {
         Some(view)
     }
 
-    /// First checkout of the focused PR of the active PRs tab.
-    fn prs_focused_checkout(&self) -> Option<PathBuf> {
+    /// What the keys of the active PRs tab act on: the focused PR's first
+    /// checkout, or the focused stack-only PR itself.
+    fn prs_focused_target(&self) -> Option<PrsTarget> {
         let view = self.prs_view()?;
         let row = view.focused()?;
-        view.checkouts_of(row).first().cloned()
+        if row.checked_out {
+            return view
+                .checkouts_of(row)
+                .first()
+                .cloned()
+                .map(PrsTarget::Checkout);
+        }
+        Some(PrsTarget::StackOnly {
+            pr: row.pr.clone(),
+            listed_by: view.listed_by(row).to_vec(),
+        })
     }
 
     /// Popover owner row of the active PRs tab: its cursor line, so a
@@ -484,7 +584,7 @@ impl AppState {
             | Action::OpenPullRequestCi
             | Action::CopyPullRequestUrl
             | Action::RefreshPullRequest
-                if !self.popover_pinned() && self.prs_focused_checkout().is_none() =>
+                if !self.popover_pinned() && self.prs_focused_target().is_none() =>
             {
                 Some(NO_PR_FOR_ROW.into())
             }
@@ -503,7 +603,7 @@ impl AppState {
     /// | `gc` | open its CI page |
     /// | `y` | copy its URL |
     /// | `r` | look every PR up again |
-    /// | `o` | show the PR's checkout in the Workspace tree |
+    /// | `o` | show the PR's checkout in the Workspace tree (a stack-only PR: `<ref> is not checked out`) |
     /// | `z` | fold or unfold the group under the cursor |
     /// | `Z` | fold or unfold every finished group |
     /// | `Tab` | narrow layout: list or detail |
@@ -669,11 +769,62 @@ impl AppState {
 
     /// Run `action` on the focused PR, or say `no PR for this row`.
     fn prs_pr_action(&mut self, action: PrAction) -> Effect {
-        match self.prs_focused_checkout() {
-            Some(checkout) => self.run_pr_action_on_checkout(action, &checkout),
+        match self.prs_focused_target() {
+            Some(PrsTarget::Checkout(checkout)) => {
+                self.run_pr_action_on_checkout(action, &checkout)
+            }
+            Some(PrsTarget::StackOnly { pr, listed_by }) => {
+                self.prs_stack_only_action(action, &pr, &listed_by)
+            }
             None => {
                 self.status = StatusMessage::warn(NO_PR_FOR_ROW);
                 Effect::None
+            }
+        }
+    }
+
+    /// Run `action` on the stack member `pr` that no visible checkout has,
+    /// with no lookup: Open PR and the CI page open its URL and its
+    /// [`PullRequest::ci_link`] (a CI link that is not a web URL says
+    /// `no CI for <ref>`), Copy URL copies its URL, and Refresh looks up
+    /// again each checkout of `listed_by` (the checkouts whose stack lists
+    /// it), or says `PR lookup already running`.
+    fn prs_stack_only_action(
+        &mut self,
+        action: PrAction,
+        pr: &PullRequest,
+        listed_by: &[PathBuf],
+    ) -> Effect {
+        let pr_ref = pr.ref_text();
+        match action {
+            PrAction::Open => Effect::OpenKnownPullRequest {
+                pr_ref,
+                url: pr.url.clone(),
+                page: PrPage::Pr,
+            },
+            PrAction::OpenCi if !is_web_url(&pr.ci_link.url) => {
+                self.status = StatusMessage::warn(no_ci_status(&pr_ref));
+                Effect::None
+            }
+            PrAction::OpenCi => Effect::OpenKnownPullRequest {
+                pr_ref,
+                url: pr.ci_link.url.clone(),
+                page: PrPage::Ci,
+            },
+            PrAction::CopyUrl => Effect::CopyClipboard {
+                text: pr.url.clone(),
+                announce: true,
+            },
+            PrAction::Refresh => {
+                let effects: Vec<Effect> = listed_by
+                    .iter()
+                    .map(|checkout| self.refresh_pull_requests(Some(checkout)))
+                    .filter(|effect| *effect != Effect::None)
+                    .collect();
+                if effects.is_empty() {
+                    self.status = StatusMessage::warn(PR_LOOKUP_RUNNING);
+                }
+                single_or_batch(effects)
             }
         }
     }
@@ -693,11 +844,19 @@ impl AppState {
 
     /// `o`: switch to the Workspace tab, leave a commit drill, and put the
     /// tree cursor on the focused PR's first checkout (its parents
-    /// unfold), with the tree focused.
+    /// unfold), with the tree focused. A stack-only PR says `<ref> is not
+    /// checked out` and stays on the tab.
     fn prs_show_in_tree(&mut self) -> Effect {
-        let Some(checkout) = self.prs_focused_checkout() else {
-            self.status = StatusMessage::warn(NO_PR_FOR_ROW);
-            return Effect::None;
+        let checkout = match self.prs_focused_target() {
+            Some(PrsTarget::Checkout(checkout)) => checkout,
+            Some(PrsTarget::StackOnly { pr, .. }) => {
+                self.status = StatusMessage::warn(not_checked_out_status(&pr.ref_text()));
+                return Effect::None;
+            }
+            None => {
+                self.status = StatusMessage::warn(NO_PR_FOR_ROW);
+                return Effect::None;
+            }
         };
         let repo = checkout.to_string_lossy().into_owned();
         let mut effects = vec![self.activate_tab(0)];
@@ -775,11 +934,20 @@ impl AppState {
         Effect::None
     }
 
-    /// `gh`: pin the popover of the focused PR's ref, where it painted.
+    /// `gh`: pin the popover of the focused PR's ref, where it painted. A
+    /// stack-only PR has no popover (it reads a checkout) and says `<ref>
+    /// is not checked out`, as `o` does; its detail pane shows the PR.
     fn prs_pin_focused(&mut self) -> Effect {
-        let Some(checkout) = self.prs_focused_checkout() else {
-            self.status = StatusMessage::warn(NO_PR_FOR_ROW);
-            return Effect::None;
+        let checkout = match self.prs_focused_target() {
+            Some(PrsTarget::Checkout(checkout)) => checkout,
+            Some(PrsTarget::StackOnly { pr, .. }) => {
+                self.status = StatusMessage::warn(not_checked_out_status(&pr.ref_text()));
+                return Effect::None;
+            }
+            None => {
+                self.status = StatusMessage::warn(NO_PR_FOR_ROW);
+                return Effect::None;
+            }
         };
         let cursor_y = self.tabs.active_prs().and_then(|tab| {
             let offset = tab.cursor_index.checked_sub(tab.scroll)?;
@@ -895,7 +1063,7 @@ impl AppState {
             return Effect::None;
         }
         self.pr_titles.due = false;
-        let groups: Vec<PrGroup> = group_prs(self.pr_entries().0)
+        let groups: Vec<PrGroup> = group_prs(self.pr_entries().entries)
             .into_iter()
             .filter(PrGroup::wants_title)
             .collect();
@@ -936,7 +1104,7 @@ impl AppState {
         if cancelled {
             return Effect::None;
         }
-        let groups = group_prs(self.pr_entries().0);
+        let groups = group_prs(self.pr_entries().entries);
         let keys = groups
             .iter()
             .filter(|group| group.wants_title())
@@ -960,7 +1128,7 @@ pub(crate) mod fixtures {
     use std::path::PathBuf;
 
     use super::super::super::pr_status::{ChecksSummary, PrState};
-    use super::super::super::pull_request::{PrLookup, PullRequest};
+    use super::super::super::pull_request::{PrLookup, PrStack, PullRequest};
     use super::super::AppState;
     use crate::snapshot::{CheckoutKind, RepoSnapshot, SyncStatus};
     use crate::testutil::{app_state_ascii, repo_snapshot};
@@ -1059,6 +1227,106 @@ pub(crate) mod fixtures {
             Some(remote.into()),
             PrLookup::Found(pr),
         ));
+    }
+
+    /// Land member `this` of `chain` for checkout `name` at `remote`, with
+    /// its stack walk: the whole chain.
+    pub(crate) fn land_with_stack(
+        app: &mut AppState,
+        name: &str,
+        remote: &str,
+        chain: &[PullRequest],
+        this: usize,
+    ) {
+        let pr = &chain[this];
+        assert!(app.apply_pr_badge(
+            Path::new(name),
+            &pr.head,
+            Some(remote.into()),
+            PrLookup::Found(pr.clone()),
+            Ok(Some(PrStack {
+                members: chain.to_vec(),
+                this,
+            })),
+        ));
+    }
+
+    /// Two stacks whose ends no checkout has. GitHub `acme/app`: `#6`
+    /// (parent, not checked out) → `#7` (`app`) → `#8` (`app-wt`) → `#9`
+    /// (draft child, not checked out). GitLab `acme/services/api`: `!4`
+    /// (not checked out) → `!5` (`api`) → `!6` (not checked out). No title
+    /// has a ticket key, so every PR is under `other`.
+    pub(crate) fn stack_workspace(ascii: bool) -> AppState {
+        let repos = [
+            checkout("api", "feature/rate-limit"),
+            checkout("app", "feature/auth-refresh"),
+            worktree("app-wt", "app", "feature/login-page"),
+        ];
+        let mut app = app_over(&repos, ascii);
+        let github = [
+            pr(
+                GH_APP,
+                6,
+                PrState::InReview,
+                "Store the tokens",
+                "feature/token-store",
+                "main",
+            ),
+            pr(
+                GH_APP,
+                7,
+                PrState::Ready,
+                "Refresh the auth token",
+                "feature/auth-refresh",
+                "feature/token-store",
+            ),
+            pr(
+                GH_APP,
+                8,
+                PrState::CiFailed,
+                "Add the login page",
+                "feature/login-page",
+                "feature/auth-refresh",
+            ),
+            pr(
+                GH_APP,
+                9,
+                PrState::Draft,
+                "Reword the login copy",
+                "feature/login-copy",
+                "feature/login-page",
+            ),
+        ];
+        land_with_stack(&mut app, "app", GH_APP, &github, 1);
+        land_with_stack(&mut app, "app-wt", GH_APP, &github, 2);
+        let gitlab = [
+            pr(
+                GL_API,
+                4,
+                PrState::InReview,
+                "Store the quotas",
+                "feature/quota-store",
+                "main",
+            ),
+            pr(
+                GL_API,
+                5,
+                PrState::CiRunning,
+                "Rate limit the API",
+                "feature/rate-limit",
+                "feature/quota-store",
+            ),
+            pr(
+                GL_API,
+                6,
+                PrState::Draft,
+                "Document the rate limit",
+                "feature/rate-limit-docs",
+                "feature/rate-limit",
+            ),
+        ];
+        land_with_stack(&mut app, "api", GL_API, &gitlab, 1);
+        app
     }
 
     /// Run `cmd` as the PR title command (`prTitleCommand`).
@@ -1379,6 +1647,243 @@ mod tests {
             view.groups[0].rows[1].stacked_on, None,
             "the row's configured default branch reaches the stack rule"
         );
+
+        // With no override, the repository's known default branch counts
+        // too, as for the stack walk.
+        let mut app = workspace(false);
+        let mut snapshot = app.snapshot.clone();
+        for row in &mut snapshot.repos {
+            if row.repo == "app-ui" {
+                row.default_branch = Some("feature/ABC-123-retry".into());
+            }
+        }
+        app.snapshot = snapshot;
+        app.dispatch(Action::OpenPrsTab);
+        let view = app.prs_view().unwrap();
+        assert_eq!(view.groups[0].rows[1].pr.ref_text(), "#319");
+        assert_eq!(view.groups[0].rows[1].stacked_on, None, "known default");
+    }
+
+    /// One listed row: its ref, whether a checkout has it, and its stack
+    /// position `(position, length)`.
+    type StackRow = (String, bool, Option<(usize, usize)>);
+
+    /// The list as one [`StackRow`] per row.
+    fn stack_rows(app: &AppState) -> Vec<StackRow> {
+        let view = app.prs_view().expect("PRs tab");
+        view.groups
+            .iter()
+            .flat_map(|group| &group.rows)
+            .map(|row| (row.pr.ref_text(), row.checked_out, row.stack_position))
+            .collect()
+    }
+
+    #[test]
+    fn stack_members_no_checkout_has_list_in_chain_order_on_both_forges() {
+        let mut app = stack_workspace(false);
+        let Effect::Batch(details) = app.dispatch(Action::OpenPrsTab) else {
+            panic!("the open asks for the checked-out PRs' details");
+        };
+        let mut asked: Vec<PathBuf> = details
+            .iter()
+            .map(|effect| match effect {
+                Effect::LookupPullRequestDetail { repo, .. } => repo.clone(),
+                other => panic!("not a detail fetch: {other:?}"),
+            })
+            .collect();
+        asked.sort();
+        assert_eq!(
+            asked,
+            ["api", "app", "app-wt"].map(PathBuf::from).to_vec(),
+            "no detail fetch for a stack-only row"
+        );
+        assert_eq!(
+            lines(&app),
+            ["other", "  #6", "  #7", "  #8", "  #9", "  !4", "  !5", "  !6"]
+        );
+        assert_eq!(
+            stack_rows(&app),
+            vec![
+                ("#6".into(), false, Some((1, 4))),
+                ("#7".into(), true, Some((2, 4))),
+                ("#8".into(), true, Some((3, 4))),
+                ("#9".into(), false, Some((4, 4))),
+                ("!4".into(), false, Some((1, 3))),
+                ("!5".into(), true, Some((2, 3))),
+                ("!6".into(), false, Some((3, 3))),
+            ]
+        );
+        assert_eq!(
+            app.tab_labels(),
+            ["Workspace", "PRs 7"],
+            "the label counts every listed row"
+        );
+        assert_eq!(app.pr_totals().prs, 3, "the tree total: checked out only");
+
+        // `#6` is listed by both checkouts' stacks; `!6` by `api` only.
+        let view = app.prs_view().unwrap();
+        let row = |pr_ref: &str| {
+            view.groups[0]
+                .rows
+                .iter()
+                .find(|row| row.pr.ref_text() == pr_ref)
+                .unwrap()
+        };
+        assert_eq!(
+            view.listed_by(row("#6")),
+            ["app", "app-wt"].map(PathBuf::from)
+        );
+        assert_eq!(view.listed_by(row("!6")), [PathBuf::from("api")]);
+        assert!(view.checkouts_of(row("#6")).is_empty());
+        assert!(view.listed_by(row("#7")).is_empty());
+    }
+
+    #[test]
+    fn keys_on_a_stack_only_row_act_on_its_own_pr() {
+        let mut app = stack_workspace(false);
+        app.dispatch(Action::OpenPrsTab);
+        for (line, url, listed_by) in [
+            (
+                "  #6",
+                "https://github.com/acme/app/pull/6",
+                &["app", "app-wt"][..],
+            ),
+            (
+                "  !6",
+                "https://gitlab.com/acme/services/api/-/merge_requests/6",
+                &["api"][..],
+            ),
+        ] {
+            cursor_to(&mut app, line);
+            let pr_ref = line.trim();
+            let ci = app
+                .prs_view()
+                .unwrap()
+                .focused()
+                .unwrap()
+                .pr
+                .ci_link
+                .url
+                .clone();
+            let open = Effect::OpenKnownPullRequest {
+                pr_ref: pr_ref.into(),
+                url: url.into(),
+                page: PrPage::Pr,
+            };
+            assert_eq!(app.dispatch(Action::NavEnter), open, "{line}: Enter");
+            assert_eq!(app.dispatch(Action::OpenPullRequest), open, "{line}: gx");
+            assert_eq!(
+                app.dispatch(Action::OpenPullRequestCi),
+                Effect::OpenKnownPullRequest {
+                    pr_ref: pr_ref.into(),
+                    url: ci,
+                    page: PrPage::Ci,
+                },
+                "{line}: gc"
+            );
+            assert_eq!(
+                app.dispatch(Action::ExportComments),
+                Effect::CopyClipboard {
+                    text: url.into(),
+                    announce: true,
+                },
+                "{line}: y"
+            );
+
+            app.status.clear();
+            assert_eq!(app.dispatch(Action::GraphFocusBranches), Effect::None);
+            assert_eq!(&*app.status, format!("{pr_ref} is not checked out"));
+            assert!(app.is_prs_tab(), "{line}: o stays on the tab");
+
+            // `gh` has no popover to pin (the row paints no PR icon): it
+            // says what `o` says.
+            app.status.clear();
+            assert_eq!(app.dispatch(Action::PopoverOpenFocused), Effect::None);
+            assert_eq!(
+                &*app.status,
+                format!("{pr_ref} is not checked out"),
+                "{line}: gh"
+            );
+            assert!(!app.popover_pinned(), "{line}: gh pins nothing");
+
+            // Refresh this PR looks up each checkout whose stack lists it.
+            let refreshed = lookup_repos(app.dispatch(Action::RefreshPullRequest));
+            assert_eq!(
+                refreshed,
+                listed_by
+                    .iter()
+                    .map(|name| PathBuf::from(*name))
+                    .collect::<Vec<_>>(),
+                "{line}"
+            );
+            app.status.clear();
+            assert_eq!(app.dispatch(Action::RefreshPullRequest), Effect::None);
+            assert_eq!(&*app.status, PR_LOOKUP_RUNNING, "{line}: in flight");
+        }
+
+        // A CI link that is not a web URL says so, as on a checked-out row.
+        let mut app = stack_workspace(false);
+        app.dispatch(Action::OpenPrsTab);
+        cursor_to(&mut app, "  #9");
+        let chain: Vec<PullRequest> = app.pr_stack(Path::new("app")).unwrap().members.clone();
+        let mut no_ci = chain.clone();
+        no_ci[3].ci_link.url = String::new();
+        land_with_stack(&mut app, "app", GH_APP, &no_ci, 1);
+        land_with_stack(&mut app, "app-wt", GH_APP, &no_ci, 2);
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::OpenPullRequestCi), Effect::None);
+        assert_eq!(&*app.status, "no CI for #9");
+
+        // Plain `r` still looks up every visible checkout, from any row.
+        let mut app = stack_workspace(false);
+        app.dispatch(Action::OpenPrsTab);
+        cursor_to(&mut app, "  #6");
+        assert_eq!(
+            lookup_repos(app.dispatch(Action::Refresh)),
+            ["api", "app", "app-wt"].map(PathBuf::from),
+            "r on a stack-only row"
+        );
+    }
+
+    /// The checkouts `effect` looks up, sorted: one
+    /// `Effect::LookupPullRequests`, or a batch of them.
+    fn lookup_repos(effect: Effect) -> Vec<PathBuf> {
+        let mut repos: Vec<PathBuf> = match effect {
+            Effect::LookupPullRequests { targets } => vec![targets],
+            Effect::Batch(effects) => effects
+                .into_iter()
+                .map(|effect| match effect {
+                    Effect::LookupPullRequests { targets } => targets,
+                    other => panic!("not a lookup: {other:?}"),
+                })
+                .collect(),
+            other => panic!("no lookup: {other:?}"),
+        }
+        .into_iter()
+        .flatten()
+        .map(|(repo, _)| repo)
+        .collect();
+        repos.sort();
+        repos
+    }
+
+    #[test]
+    fn palette_pr_rows_run_on_a_stack_only_row() {
+        let mut app = stack_workspace(false);
+        app.dispatch(Action::OpenPrsTab);
+        cursor_to(&mut app, "  #6");
+        for action in [
+            Action::OpenPullRequest,
+            Action::OpenPullRequestCi,
+            Action::CopyPullRequestUrl,
+            Action::RefreshPullRequest,
+        ] {
+            assert_eq!(
+                app.palette_disabled_reason(command_for(&action).expect("a palette row")),
+                None,
+                "{action:?}"
+            );
+        }
     }
 
     /// The header double-click window is the gap between the two presses'
@@ -1678,9 +2183,10 @@ mod tests {
         );
         assert_eq!(
             app.dispatch(Action::OpenPullRequestCi),
-            Effect::OpenPullRequestCi {
+            Effect::OpenKnownPullRequest {
                 pr_ref: "#318".into(),
                 url: format!("{url}/checks"),
+                page: PrPage::Ci,
             },
             "gc"
         );

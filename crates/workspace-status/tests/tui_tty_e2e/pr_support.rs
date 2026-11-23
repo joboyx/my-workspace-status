@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::common::fake_forge::{set_origin, FakeForge, GITHUB_ORIGIN, GITLAB_ORIGIN};
+use crate::common::fake_forge::{set_origin, FakeForge, Reply, GITHUB_ORIGIN, GITLAB_ORIGIN};
 use crate::common::pr_scenarios::{
-    github_check_url, gitlab_pipeline_url, put_github, put_github_behind, put_github_closed,
-    put_github_with, put_gitlab, put_gitlab_behind, put_gitlab_closed, put_gitlab_with, Badge,
-    PrText, GITHUB_REPO, GITLAB_PROJECT,
+    github_check_url, github_list_json, gitlab_list_json, gitlab_pipeline_url, put_github,
+    put_github_behind, put_github_closed, put_github_with, put_gitlab, put_gitlab_behind,
+    put_gitlab_closed, put_gitlab_with, Badge, PrText, GITHUB_REPO, GITLAB_PROJECT,
 };
 use crate::common::seed::{seed_repo, unique_root};
 use crate::harness::PtySession;
@@ -175,7 +175,6 @@ impl PrCheckout {
 
     /// Make the fake forge answer with no PR for this branch.
     pub fn set_none(&self, forge: &FakeForge) {
-        use crate::common::fake_forge::Reply;
         match self.forge {
             Forge::GitHub => forge.github_pr_list(GITHUB_REPO, &self.branch, Reply::Json("[]")),
             Forge::GitLab => forge.gitlab_mr_list(GITLAB_PROJECT, &self.branch, Reply::Json("[]")),
@@ -350,6 +349,13 @@ pub fn tree_text_paint(tui: &PtySession, name: &str, needle: &str) -> Option<((u
     Some((paint.fg?, paint.bold))
 }
 
+/// True when the tree row of `name` ends in ` <text>` flush with the pane
+/// border: the whole badge as painted, for example `#8 3/4 P` for a PR in a
+/// stacked chain (ref, stack position, glyph).
+pub fn badge_text_is(tui: &PtySession, name: &str, text: &str) -> bool {
+    tree_row_text(tui, name).is_some_and(|row| row.ends_with(&format!(" {text}")))
+}
+
 /// True when the tree row of `name` ends in `<ref> <glyph>` flush with the
 /// pane border (`ref_text` `None`: the glyph alone, with no ref before it).
 pub fn badge_is(tui: &PtySession, name: &str, ref_text: Option<&str>, glyph: char) -> bool {
@@ -459,13 +465,32 @@ pub fn click_badge(tui: &mut PtySession, name: &str) {
     tui.sgr_click(badge.col, badge.row);
 }
 
-/// `calls.log` lines of `forge` that are a list lookup (`gh pr list`, the
-/// GitLab merge request list), not a detail or approvals call.
+/// `calls.log` lines of `forge` that are a per-branch list lookup (`gh pr
+/// list --head`, the GitLab merge request list by `source_branch`): the
+/// badge lookups, and the parent lookups of a stack walk. Not a detail,
+/// approvals, or children list call ([`children_calls`]).
 pub fn list_calls(forge: &FakeForge) -> Vec<String> {
     forge
         .calls()
         .into_iter()
-        .filter(|call| call.starts_with("gh pr list ") || call.contains("/merge_requests?"))
+        .filter(|call| {
+            (call.starts_with("gh pr list ") && call.contains(" --head "))
+                || call.contains("/merge_requests?source_branch=")
+        })
+        .collect()
+}
+
+/// `calls.log` lines of `forge` that list the children of a PR in a stack
+/// walk (`gh pr list --base`, the GitLab merge request list by
+/// `target_branch`): one per found PR whose head can be stacked on.
+pub fn children_calls(forge: &FakeForge) -> Vec<String> {
+    forge
+        .calls()
+        .into_iter()
+        .filter(|call| {
+            (call.starts_with("gh pr list ") && call.contains(" --base "))
+                || call.contains("/merge_requests?target_branch=")
+        })
         .collect()
 }
 
@@ -685,6 +710,155 @@ pub fn seed_prs(prefix: &str, specs: &[PrSpec]) -> (PathBuf, PathBuf, FakeForge)
         spec.checkout().set_with(&forge, spec.badge, spec.text);
     }
     (root, workspace, forge)
+}
+
+impl PrSpec {
+    /// This PR as one entry of a list answer, in the list shape of its forge.
+    fn list_entry(&self) -> String {
+        let list = match self.forge {
+            Forge::GitHub => github_list_json(self.number, self.branch, self.badge, self.text),
+            Forge::GitLab => gitlab_list_json(self.number, self.branch, self.badge, self.text),
+        };
+        list[1..list.len() - 1].to_string()
+    }
+
+    /// Make the fake forge answer the stack walk's children list of this
+    /// PR (`gh pr list --base <head>`, the GitLab list by `target_branch`)
+    /// with `children`: the open PRs whose base is this PR's head branch.
+    pub fn set_children(&self, forge: &FakeForge, children: &[PrSpec]) {
+        let entries: Vec<String> = children.iter().map(PrSpec::list_entry).collect();
+        let body = format!("[{}]", entries.join(","));
+        match self.forge {
+            Forge::GitHub => {
+                forge.github_pr_list_base(GITHUB_REPO, self.branch, Reply::Json(&body))
+            }
+            Forge::GitLab => {
+                forge.gitlab_mr_list_base(GITLAB_PROJECT, self.branch, Reply::Json(&body))
+            }
+        }
+    }
+}
+
+/// Make the fake forge answer a stacked chain as a real forge does: each PR
+/// of `chain` (root first, each PR based on the head of the one before) by
+/// its branch and number, and the children list of each PR with the next
+/// PR, the last with none. A checkout of any member then walks the whole
+/// chain.
+pub fn put_chain(forge: &FakeForge, chain: &[PrSpec]) {
+    for (at, spec) in chain.iter().enumerate() {
+        spec.checkout().set_with(forge, spec.badge, spec.text);
+        spec.set_children(forge, &chain[at + 1..(at + 2).min(chain.len())]);
+    }
+}
+
+/// The GitHub chain of the `stack` verify set, `acme/app`: `#6` → `#7` →
+/// `#8` → `#9`. `#7` (`app-auth`) and `#8` (`app-login`) are checked out
+/// ([`STACK_CHECKOUTS`]); `#6`, the root, and `#9`, an open draft, are not.
+pub const GITHUB_STACK: [PrSpec; 4] = [
+    spec(
+        "app-token",
+        "feature/token-store",
+        Forge::GitHub,
+        6,
+        Badge::InReview,
+        "feat(ABC-123): Store auth tokens per session",
+        "main",
+    ),
+    spec(
+        "app-auth",
+        "feature/auth-refresh",
+        Forge::GitHub,
+        7,
+        Badge::CiFailed,
+        "fix(ABC-123): Refresh auth tokens before expiry",
+        "feature/token-store",
+    ),
+    spec(
+        "app-login",
+        "feature/login-page",
+        Forge::GitHub,
+        8,
+        Badge::InReview,
+        "feat(ABC-123): Add the login page",
+        "feature/auth-refresh",
+    ),
+    spec(
+        "app-copy",
+        "feature/login-copy",
+        Forge::GitHub,
+        9,
+        Badge::Draft,
+        "docs(ABC-123): Reword the login page copy",
+        "feature/login-page",
+    ),
+];
+
+/// The GitLab chain of the `stack` verify set, `acme/services/api`: `!4`
+/// → `!5` → `!6`. Only `!5` (`api-limit`) is checked out.
+pub const GITLAB_STACK: [PrSpec; 3] = [
+    spec(
+        "api-quota",
+        "feature/quota-store",
+        Forge::GitLab,
+        4,
+        Badge::InReview,
+        "[ABC-125] Store request quotas per client",
+        "main",
+    ),
+    spec(
+        "api-limit",
+        "feature/rate-limit",
+        Forge::GitLab,
+        5,
+        Badge::CiRunning,
+        "[ABC-125] Rate limit the public API",
+        "feature/quota-store",
+    ),
+    spec(
+        "api-docs",
+        "feature/rate-limit-docs",
+        Forge::GitLab,
+        6,
+        Badge::InReview,
+        "[ABC-125] Document the rate limits",
+        "feature/rate-limit",
+    ),
+];
+
+/// Checkout directories of [`GITHUB_STACK`] and [`GITLAB_STACK`] that
+/// [`seed_stacks`] seeds; the other members exist only on the fake forge.
+pub const STACK_CHECKOUTS: [&str; 3] = ["app-auth", "app-login", "api-limit"];
+
+/// Seed the checked-out members of both stack chains in a workspace named
+/// `ws`, and make the fake forge answer both chains ([`put_chain`]).
+pub fn seed_stacks(prefix: &str) -> (PathBuf, PathBuf, FakeForge) {
+    let checked_out: Vec<PrSpec> = GITHUB_STACK
+        .iter()
+        .chain(GITLAB_STACK.iter())
+        .filter(|spec| STACK_CHECKOUTS.contains(&spec.dir))
+        .copied()
+        .collect();
+    let (root, workspace, forge) = seed_prs(prefix, &checked_out);
+    put_chain(&forge, &GITHUB_STACK);
+    put_chain(&forge, &GITLAB_STACK);
+    (root, workspace, forge)
+}
+
+/// True when `lines`, each folded ([`folded`]), hold `want` on consecutive
+/// lines: line `i` of the run contains `want[i]`.
+pub fn has_run(lines: &[String], want: &[&str]) -> bool {
+    let folded: Vec<String> = lines.iter().map(|line| folded(line)).collect();
+    (0..folded.len()).any(|top| {
+        want.iter()
+            .enumerate()
+            .all(|(i, text)| folded.get(top + i).is_some_and(|line| line.contains(text)))
+    })
+}
+
+/// [`has_run`] over the lines of `screen`.
+pub fn screen_has_run(screen: &str, want: &[&str]) -> bool {
+    let lines: Vec<String> = screen.lines().map(str::to_string).collect();
+    has_run(&lines, want)
 }
 
 /// Body rows of the boxed pane whose top border starts `┌<title>─`, from

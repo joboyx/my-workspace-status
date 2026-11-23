@@ -877,15 +877,19 @@ pub enum Effect {
         /// The PR page (`gx`) or its CI page (`gc`).
         page: PrPage,
     },
-    /// Open the CI page `url` of the known PR `pr_ref` in the browser on a
-    /// worker (`gc` on a row whose PR answer is known). No lookup runs.
+    /// Open `page` of the known PR `pr_ref` at `url` in the browser on a
+    /// worker: its CI page (`gc` on a row whose PR answer is known), or the
+    /// PR itself (Enter or `gx` on a PRs tab row of a stack member that no
+    /// checkout has). No lookup runs.
     ///
     /// The status line reports the result.
-    OpenPullRequestCi {
+    OpenKnownPullRequest {
         /// `#318` (GitHub) or `!12` (GitLab), for the status line.
         pr_ref: String,
-        /// The PR's [`super::pr_status::CiLink::url`].
+        /// The PR's URL, or its [`super::pr_status::CiLink::url`].
         url: String,
+        /// Which page `url` is.
+        page: PrPage,
     },
     /// Check on a worker that `target` is on the remote of `checkout`, then
     /// open its forge page in the browser.

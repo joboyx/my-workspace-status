@@ -13,9 +13,9 @@ One file per feature. Each file lists recipes with steps, the screen text to exp
 | 7 | [doctor](doctor.md) | `Doctor: setup checkup` from the palette: the four-count head, the terminal capability rows inside tmux (answered or unknown, never fail), the live wheel row (wheel → ok, Down arrow → warn, reset on a new open), `ws doctor` text report and exit 0 | `wsctl`, `wsctl run`, driver `mouse wheel` |
 | 8 | [json-snapshot](json-snapshot.md) | `--json` and `--plain` of the fixture, run headless with the run's isolation; the refused flags | `wsctl run` |
 | 9 | [tree-and-graph](tree-and-graph.md) | PR badges in the tree and the graph pane, the glyph column at wide and narrow widths, the graph chip | `scripts/verify-tui.sh` (fake forge) |
-| 10 | [pr-status](pr-status.md) | PR badge states on both forges, `gx` and `gc`, a scripted transition, a failing CLI, the lookup outage, live recipe | `scripts/verify-tui.sh` (fake forge, live) |
+| 10 | [pr-status](pr-status.md) | PR badge states on both forges, `gx` and `gc`, a scripted transition, a failing CLI, the lookup outage, the stack position, live recipe | `scripts/verify-tui.sh` (fake forge, live) |
 | 11 | [popovers](popovers.md) | The PR popover and the commit popovers by mouse hover and click | `scripts/verify-tui.sh` (fake forge, mouse) |
-| 12 | [prs-tab](prs-tab.md) | The PRs tab (`gp`): groups, detail, folds, actions, narrow layout, outage, empty state | `scripts/verify-tui.sh` (fake forge) |
+| 12 | [prs-tab](prs-tab.md) | The PRs tab (`gp`): groups, detail, folds, actions, narrow layout, outage, empty state, stacked PR chains | `scripts/verify-tui.sh` (fake forge) |
 | 13 | [multi-surface-journeys](multi-surface-journeys.md) | One user path across tree → diff → graph (`Tab`) → commit files → back | `wsctl` |
 
 Files 9 to 12 use the driver directly: they need `scenario`, `calls` and `mouse`, which `wsctl` leaves to the driver. Their shared prelude is **Setup** in [pr-status.md](pr-status.md). File 7 is a `wsctl` file that calls the driver only for `mouse` (the run dir comes from `start`).

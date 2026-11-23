@@ -4,9 +4,9 @@ use crate::common::fake_forge::{FakeForge, Reply};
 use crate::common::pr_scenarios::{Badge, GITHUB_REPO, GITLAB_PROJECT};
 use crate::harness::PtySession;
 use crate::pr_support::{
-    assert_holds_for, badge_glyph_paint, badge_is, badge_ref_fg, click_badge, forge_env,
-    glyph_colour, has_alert, list_calls, named_workspace, seed_checkouts, Forge, PrCheckout,
-    MODIFIED, MUTED,
+    assert_holds_for, badge_glyph_paint, badge_is, badge_ref_fg, children_calls, click_badge,
+    forge_env, glyph_colour, has_alert, list_calls, named_workspace, seed_checkouts, Forge,
+    PrCheckout, MODIFIED, MUTED,
 };
 use crate::support::{tree_cursor_on, GIT_WAIT, WAIT};
 
@@ -243,6 +243,7 @@ fn pty_pr_failing_cli_on_r_keeps_the_badge_and_r_recovers() {
             WAIT,
         );
         let before = list_calls(&forge).len();
+        let children = children_calls(&forge).len();
         tui.key('r');
         wait_lookups(&tui, &forge, before, 1, &format!("r looks {name} up"));
         assert_holds_for(
@@ -252,9 +253,9 @@ fn pty_pr_failing_cli_on_r_keeps_the_badge_and_r_recovers() {
             &format!("r against the failing CLI keeps the {name} badge"),
         );
         assert_eq!(
-            list_calls(&forge).len(),
-            before + 1,
-            "one r, one list call: {:?}",
+            (list_calls(&forge).len(), children_calls(&forge).len()),
+            (before + 1, children),
+            "one r, one list call, and no stack walk for a failed lookup: {:?}",
             forge.calls()
         );
     }
@@ -270,6 +271,7 @@ fn pty_pr_failing_cli_on_r_keeps_the_badge_and_r_recovers() {
             WAIT,
         );
         let before = list_calls(&forge).len();
+        let children = children_calls(&forge).len();
         tui.key('r');
         tui.wait_pred(
             |_| badge_is(&tui, name, Some(ref_text), 'r'),
@@ -277,9 +279,9 @@ fn pty_pr_failing_cli_on_r_keeps_the_badge_and_r_recovers() {
             GIT_WAIT,
         );
         assert_eq!(
-            list_calls(&forge).len(),
-            before + 1,
-            "one r, one list call: {:?}",
+            (list_calls(&forge).len(), children_calls(&forge).len()),
+            (before + 1, children + 1),
+            "one r, one list call, and the found PR's children list: {:?}",
             forge.calls()
         );
     }

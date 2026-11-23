@@ -1778,7 +1778,19 @@ pub const PR_REF_MIN_TREE_COLS: usize = 50;
 /// the workspace PR total).
 const PR_BADGE_GAP: &str = "  ";
 
-/// What the PR badge of one tree row paints: `<ref> <glyph>`.
+/// Stack position text of a PR at 1-based `position` of a chain of `len`
+/// PRs: `⧗2/3`, or `2/3` in ASCII mode. The tree badge and the graph header
+/// chip paint it after the PR ref.
+pub fn pr_stack_position_text(ascii: bool, position: usize, len: usize) -> String {
+    if ascii {
+        format!("{position}/{len}")
+    } else {
+        format!("⧗{position}/{len}")
+    }
+}
+
+/// What the PR badge of one tree row paints: `<ref> <glyph>`, or
+/// `<ref> <position> <glyph>` for a stacked PR.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrBadge {
     /// Badge mark: picks the glyph and its colour ([`PrMark::kind`],
@@ -1787,6 +1799,10 @@ pub struct PrBadge {
     /// `#318` (GitHub) or `!12` (GitLab). `None` paints the glyph alone (a
     /// tree narrower than [`PR_REF_MIN_TREE_COLS`], or the failure mark).
     pub ref_text: Option<String>,
+    /// Stack position of the PR: its 1-based place in its stacked PR chain
+    /// and the member count ([`pr_stack_position_text`]). `None` for a PR
+    /// with no stack. It paints only with the ref, so it drops with it.
+    pub position: Option<(usize, usize)>,
     /// The last successful lookup is old: the glyph paints muted too.
     pub stale: bool,
 }
@@ -1809,11 +1825,12 @@ pub fn pr_badge_repo(row: &VisibleRow) -> Option<&str> {
 /// badge glyph shares one column.
 ///
 /// The ref paints muted and the glyph bold in its state colour
-/// ([`PrMark::role`]); a stale badge paints both muted. A failed lookup
-/// with no earlier answer paints the failure mark `!` alone, bold in the
-/// deleted colour. Both segments
-/// carry the badge's [`IconKind`], so hover, pin, Ctrl+click, and the link
-/// cover ref and glyph.
+/// ([`PrMark::role`]); a stale badge paints both muted. A stacked PR
+/// paints its position between the ref and the glyph (`#8 ⧗2/3 ◌`, ASCII
+/// `#8 2/3 d`), muted, and only with the ref. A failed lookup with no
+/// earlier answer paints the failure mark `!` alone, bold in the deleted
+/// colour. Every badge segment carries the badge's [`IconKind`], so hover,
+/// pin, Ctrl+click, and the link cover ref, position, and glyph.
 ///
 /// Returns the index of the glyph in `segs.trailing`, or `None` when
 /// `badge` is `None` or the label paints no branch text. Tree rows are
@@ -1842,6 +1859,11 @@ pub fn with_pr_badge(
     if let Some(ref_text) = &badge.ref_text {
         trailing.push(icon_text_seg(ref_text.clone(), SegRole::Muted, kind));
         trailing.push(text_seg(" ", SegRole::Muted));
+        if let Some((position, len)) = badge.position {
+            let text = pr_stack_position_text(ascii, position, len);
+            trailing.push(icon_text_seg(text, SegRole::Muted, kind));
+            trailing.push(text_seg(" ", SegRole::Muted));
+        }
     }
     trailing.push(TextSeg {
         bold: true,

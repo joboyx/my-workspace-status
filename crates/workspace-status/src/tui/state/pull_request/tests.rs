@@ -586,6 +586,17 @@ fn open_result_sets_status_and_refreshes_the_cache() {
     );
     assert_eq!(app.status, "no PR for feature");
     assert_eq!(app.pr_badge(path), None, "fresh answer replaces the badge");
+
+    // A merge request says its GitLab ref, as an open of a known one does.
+    app.apply_pr_open(
+        path,
+        "feature",
+        Some(GL_REMOTE.into()),
+        open_on(GL_REMOTE, 4),
+        PrPage::Pr,
+        true,
+    );
+    assert_eq!(app.status, "opened PR !4");
 }
 
 /// Screen row of tree row `id` with the default layout (no scroll).
@@ -2513,9 +2524,10 @@ fn gc(app: &mut AppState) -> Effect {
 }
 
 fn ci_open(pr_ref: &str, url: &str) -> Effect {
-    Effect::OpenPullRequestCi {
+    Effect::OpenKnownPullRequest {
         pr_ref: pr_ref.into(),
         url: url.into(),
+        page: PrPage::Ci,
     }
 }
 
@@ -2726,12 +2738,33 @@ fn pr_popover_lines_act_on_their_own_pr_not_the_focused_graph_row() {
 fn a_ci_open_reports_each_outcome_on_the_status_line() {
     let mut app = app_with(&[repo("app", "feature")], &[]);
     let _ = app.due_pr_lookups();
-    for (pr_ref, opened, text, kind) in [
-        ("#318", true, "opened CI for #318", StatusKind::Ok),
-        ("!12", true, "opened CI for !12", StatusKind::Ok),
-        ("#318", false, "could not open CI", StatusKind::Error),
+    for (pr_ref, page, opened, text, kind) in [
+        (
+            "#318",
+            PrPage::Ci,
+            true,
+            "opened CI for #318",
+            StatusKind::Ok,
+        ),
+        ("!12", PrPage::Ci, true, "opened CI for !12", StatusKind::Ok),
+        (
+            "#318",
+            PrPage::Ci,
+            false,
+            "could not open CI",
+            StatusKind::Error,
+        ),
+        ("#6", PrPage::Pr, true, "opened PR #6", StatusKind::Ok),
+        ("!4", PrPage::Pr, true, "opened PR !4", StatusKind::Ok),
+        (
+            "#6",
+            PrPage::Pr,
+            false,
+            "could not open PR",
+            StatusKind::Error,
+        ),
     ] {
-        app.apply_pr_ci_open(pr_ref, opened);
+        app.apply_pr_known_open(pr_ref, page, opened);
         assert_eq!(app.status, text);
         assert_eq!(app.status.kind(), kind, "{text}");
     }
@@ -3577,4 +3610,347 @@ fn a_failed_lookup_with_no_forge_host_shares_one_unknown_outage() {
     };
     assert!(app.outages.get(&unknown).is_some());
     assert_eq!(outage_toasts(&app), ["PR (unknown): lookup failed"]);
+}
+
+// ---- Stacked PR chain ----
+
+/// PR `number` of `remote` from `head` into `base`, in review.
+fn chain_pr(remote: &str, number: u64, head: &str, base: &str) -> PullRequest {
+    PullRequest {
+        head: head.into(),
+        base: base.into(),
+        ..pr_on(remote, number, PrState::InReview)
+    }
+}
+
+/// The chain #7 (`feature/a` into `main`) → #8 (`feature`, checkout
+/// `app`) → #9 (`feature/c`) on `remote`, seen from #8.
+fn chain(remote: &str) -> PrStack {
+    PrStack {
+        members: vec![
+            chain_pr(remote, 7, "feature/a", "main"),
+            chain_pr(remote, 8, "feature", "feature/a"),
+            chain_pr(remote, 9, "feature/c", "feature"),
+        ],
+        this: 1,
+    }
+}
+
+/// `app` on `feature` with its lookup in flight.
+fn stack_app() -> AppState {
+    let mut app = app_with(&[repo("app", "feature")], &[]);
+    let _ = app.due_pr_lookups();
+    app
+}
+
+/// Land badge lookup `pr` of `app` at `remote` with stack walk `stack`.
+fn land_stack(
+    app: &mut AppState,
+    remote: &str,
+    pr: PullRequest,
+    stack: Result<Option<PrStack>, Option<String>>,
+) {
+    assert!(app.apply_pr_badge(
+        Path::new("app"),
+        "feature",
+        Some(remote.into()),
+        PrLookup::Found(pr),
+        stack,
+    ));
+}
+
+/// A found PR lands its stack beside the answer on both forges: the tree
+/// badge carries the position with the ref, and a tree too narrow for the
+/// ref drops both. A walk with no chain drops the stack.
+#[test]
+fn a_badge_lookup_lands_the_stack_beside_its_answer_on_both_forges() {
+    for (remote, pr_ref) in [(GH_REMOTE, "#8"), (GL_REMOTE, "!8")] {
+        let mut app = stack_app();
+        let path = Path::new("app");
+        let stack = chain(remote);
+        land_stack(
+            &mut app,
+            remote,
+            stack.members[1].clone(),
+            Ok(Some(stack.clone())),
+        );
+        assert_eq!(app.pr_stack(path), Some(&stack), "{remote}");
+        let now = Instant::now();
+        let wide = app
+            .tree_pr_badge(path, PR_REF_MIN_TREE_COLS, now)
+            .expect("badge");
+        assert_eq!(
+            (wide.ref_text.as_deref(), wide.position),
+            (Some(pr_ref), Some((2, 3))),
+            "{remote}"
+        );
+        let narrow = app
+            .tree_pr_badge(path, PR_REF_MIN_TREE_COLS - 1, now)
+            .expect("badge");
+        assert_eq!((narrow.ref_text, narrow.position), (None, None), "{remote}");
+
+        land_stack(&mut app, remote, stack.members[1].clone(), Ok(None));
+        assert_eq!(app.pr_stack(path), None, "{remote}: no chain");
+        let badge = app.tree_pr_badge(path, 120, now).expect("badge");
+        assert_eq!(badge.position, None, "{remote}");
+    }
+}
+
+/// A failed walk keeps the last stack, with the fresh copy of the PR the
+/// badge shows, and sets no status, toast, outage, or lookup failure.
+#[test]
+fn a_failed_walk_keeps_the_last_stack_and_adds_no_toast() {
+    for remote in [GH_REMOTE, GL_REMOTE] {
+        let mut app = stack_app();
+        let path = Path::new("app");
+        let stack = chain(remote);
+        land_stack(
+            &mut app,
+            remote,
+            stack.members[1].clone(),
+            Ok(Some(stack.clone())),
+        );
+        let ready = PullRequest {
+            state: PrState::Ready,
+            ..stack.members[1].clone()
+        };
+        land_stack(
+            &mut app,
+            remote,
+            ready.clone(),
+            Err(Some("HTTP 502".into())),
+        );
+        let kept = app.pr_stack(path).expect("kept");
+        assert_eq!(kept.members.len(), 3, "{remote}");
+        assert_eq!(kept.members[0], stack.members[0], "{remote}");
+        assert_eq!(kept.members[1], ready, "{remote}: the fresh PR");
+        assert_eq!(app.pr_badge(path), Some(PrState::Ready), "{remote}");
+        assert!(app.status.is_empty(), "{remote}");
+        assert_eq!(app.toasts.visible(Instant::now()).count(), 0, "{remote}");
+        assert!(app.outages.is_empty(), "{remote}");
+        assert_eq!(app.pr_lookup_failure(path), None, "{remote}");
+    }
+}
+
+/// The stack follows the answer: a failed lookup and a `gx` of the same PR
+/// keep it; an answer that names another PR, or no PR, drops it.
+#[test]
+fn no_pr_or_another_pr_drops_the_stack_and_a_failed_lookup_keeps_it() {
+    for remote in [GH_REMOTE, GL_REMOTE] {
+        let mut app = stack_app();
+        let path = Path::new("app");
+        let stack = chain(remote);
+        let this = stack.members[1].clone();
+        land_stack(&mut app, remote, this.clone(), Ok(Some(stack.clone())));
+        assert!(app.apply_pr_badge(
+            path,
+            "feature",
+            Some(remote.into()),
+            PrLookup::Failed(Some("HTTP 401".into())),
+            Ok(None),
+        ));
+        assert_eq!(app.pr_stack(path), Some(&stack), "{remote}: failed lookup");
+        app.apply_pr_open(
+            path,
+            "feature",
+            Some(remote.into()),
+            PrLookup::Found(this.clone()),
+            PrPage::Pr,
+            true,
+        );
+        assert_eq!(app.pr_stack(path), Some(&stack), "{remote}: gx");
+
+        let other = chain_pr(remote, 10, "feature", "feature/a");
+        land_stack(&mut app, remote, other, Err(None));
+        assert_eq!(app.pr_stack(path), None, "{remote}: another PR");
+
+        land_stack(&mut app, remote, this, Ok(Some(stack.clone())));
+        assert!(app.apply_pr_badge(
+            path,
+            "feature",
+            Some(remote.into()),
+            PrLookup::NoPr,
+            Ok(None),
+        ));
+        assert_eq!(app.pr_stack(path), None, "{remote}: no PR");
+        assert!(app.pr_cache.stacks.is_empty(), "{remote}");
+    }
+}
+
+/// `r` and a full reload keep the stack on screen until the new walk
+/// lands; a branch switch hides it and the next sync prunes it.
+#[test]
+fn r_keeps_the_stack_until_the_new_walk_lands_and_a_branch_switch_prunes_it() {
+    let mut app = stack_app();
+    let path = Path::new("app");
+    let stack = chain(GH_REMOTE);
+    let this = stack.members[1].clone();
+    land_stack(&mut app, GH_REMOTE, this.clone(), Ok(Some(stack.clone())));
+    app.forget_pr_lookups(Some(path));
+    assert_eq!(app.pr_stack(path), Some(&stack), "r");
+    assert_eq!(names(app.due_pr_lookups()), pairs(&[("app", "feature")]));
+    assert_eq!(app.pr_stack(path), Some(&stack), "while the lookup runs");
+    land_stack(&mut app, GH_REMOTE, this.clone(), Ok(None));
+    assert_eq!(app.pr_stack(path), None, "the new walk lands");
+
+    land_stack(&mut app, GH_REMOTE, this, Ok(Some(stack.clone())));
+    app.forget_pr_lookups(None);
+    let _ = app.due_pr_lookups();
+    assert_eq!(app.pr_stack(path), Some(&stack), "full reload");
+
+    apply_one_repo_snapshot(&mut app, "app", Some(repo("app", "other")));
+    assert_eq!(app.pr_stack(path), None, "another branch");
+    let _ = app.due_pr_lookups();
+    assert!(app.pr_cache.stacks.is_empty(), "pruned with the answer");
+}
+
+/// `pr_stack_base` finds the parent among the stack members when no
+/// checkout has it; a checkout that has it wins, since its answer is
+/// newer.
+#[test]
+fn pr_stack_base_finds_a_parent_that_no_checkout_has() {
+    for remote in [GH_REMOTE, GL_REMOTE] {
+        let mut app = stack_app();
+        let path = Path::new("app");
+        let stack = chain(remote);
+        land_stack(&mut app, remote, stack.members[1].clone(), Err(None));
+        assert_eq!(app.pr_stack_base(path), None, "{remote}: no stack yet");
+        land_stack(
+            &mut app,
+            remote,
+            stack.members[1].clone(),
+            Ok(Some(stack.clone())),
+        );
+        assert_eq!(app.pr_stack_base(path), Some(&stack.members[0]), "{remote}");
+
+        let mut app = app_with(&[repo("app", "feature"), repo("lib", "feature/a")], &[]);
+        let _ = app.due_pr_lookups();
+        land_stack(
+            &mut app,
+            remote,
+            stack.members[1].clone(),
+            Ok(Some(stack.clone())),
+        );
+        let merged = PullRequest {
+            state: PrState::Merged,
+            ..stack.members[0].clone()
+        };
+        assert!(app.apply_pr_lookup(
+            Path::new("lib"),
+            "feature/a",
+            Some(remote.into()),
+            PrLookup::Found(merged.clone()),
+        ));
+        assert_eq!(app.pr_stack_base(path), Some(&merged), "{remote}");
+    }
+}
+
+/// The stack rule's default branch is the configured override, else the
+/// known default branch; `pr_stack_base` honours it.
+#[test]
+fn the_stack_default_branch_is_the_override_else_the_known_default() {
+    let cases = [
+        (None, None, None),
+        (None, Some("release"), Some("release")),
+        (Some("stable"), Some("release"), Some("stable")),
+        (Some("stable"), None, Some("stable")),
+    ];
+    for (configured, known, want) in cases {
+        let mut row = repo("app", "feature");
+        row.default_branch_override = configured.map(str::to_string);
+        row.default_branch = known.map(str::to_string);
+        let app = app_with(&[row], &[]);
+        assert_eq!(
+            app.pr_stack_default_branch(Path::new("app")),
+            want,
+            "{configured:?} {known:?}"
+        );
+    }
+
+    // #8 into `release`, stacked on #7 from `release`: only when `release`
+    // is not the default branch.
+    let parent = chain_pr(GH_REMOTE, 7, "release", "main");
+    let this = chain_pr(GH_REMOTE, 8, "feature", "release");
+    let stack = PrStack {
+        members: vec![parent.clone(), this.clone()],
+        this: 1,
+    };
+    for (known, want) in [(None, Some(&parent)), (Some("release"), None)] {
+        let mut row = repo("app", "feature");
+        row.default_branch = known.map(str::to_string);
+        let mut app = app_with(&[row], &[]);
+        let _ = app.due_pr_lookups();
+        land_stack(&mut app, GH_REMOTE, this.clone(), Ok(Some(stack.clone())));
+        assert_eq!(app.pr_stack_base(Path::new("app")), want, "{known:?}");
+    }
+}
+
+/// The chain of [`chain`] with this PR (#8) merged and the other members
+/// in `others`.
+fn merged_chain(remote: &str, others: PrState) -> PrStack {
+    let mut stack = chain(remote);
+    for (at, member) in stack.members.iter_mut().enumerate() {
+        member.state = if at == stack.this {
+            PrState::Merged
+        } else {
+            others
+        };
+    }
+    stack
+}
+
+/// A merged PR whose stack still holds an open member is polled and its
+/// badge can go stale, so its walk keeps that member current; once every
+/// member is merged, or the stack is gone, it is not polled.
+#[test]
+fn a_merged_pr_with_an_open_stack_member_is_polled_until_the_chain_is_merged() {
+    for remote in [GH_REMOTE, GL_REMOTE] {
+        let mut app = stack_app();
+        let path = Path::new("app");
+        let t0 = Instant::now();
+        let open = merged_chain(remote, PrState::InReview);
+        let this = open.members[open.this].clone();
+        assert!(app.apply_pr_badge_at(
+            path,
+            "feature",
+            Some(remote.into()),
+            PrLookup::Found(this.clone()),
+            Ok(Some(open)),
+            t0,
+        ));
+        assert_eq!(polled(&mut app, t0 + secs(180)), ["app"], "{remote}");
+        assert!(!app.pr_is_stale(path, t0 + secs(360)), "{remote}");
+        assert!(
+            app.pr_is_stale(path, t0 + secs(361)),
+            "{remote}: an open stack member goes stale"
+        );
+
+        let t1 = t0 + secs(400);
+        assert!(app.apply_pr_badge_at(
+            path,
+            "feature",
+            Some(remote.into()),
+            PrLookup::Found(this.clone()),
+            Ok(Some(merged_chain(remote, PrState::Merged))),
+            t1,
+        ));
+        assert!(
+            polled(&mut app, t1 + secs(9999)).is_empty(),
+            "{remote}: every member merged"
+        );
+        assert!(!app.pr_is_stale(path, t1 + secs(9999)), "{remote}");
+
+        assert!(app.apply_pr_badge_at(
+            path,
+            "feature",
+            Some(remote.into()),
+            PrLookup::Found(this),
+            Ok(None),
+            t1,
+        ));
+        assert!(
+            polled(&mut app, t1 + secs(9999)).is_empty(),
+            "{remote}: no stack"
+        );
+    }
 }

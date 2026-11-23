@@ -101,6 +101,16 @@ impl FakeForge {
         );
     }
 
+    /// Answer for `gh pr list --base <branch>` (no `--head`) on GitHub
+    /// repository `repo`: the open PRs that target `branch`, as the stack
+    /// walk lists children.
+    pub fn github_pr_list_base(&self, repo: &str, branch: &str, reply: Reply<'_>) {
+        self.put(
+            &format!("gh/{}/pr-list-base/{}.json", slug(repo), slug(branch)),
+            reply,
+        );
+    }
+
     /// Answer for `gh pr view <number>` on GitHub repository `repo`.
     pub fn github_pr_view(&self, repo: &str, number: u64, reply: Reply<'_>) {
         self.put(&format!("gh/{}/pr-view/{number}.json", slug(repo)), reply);
@@ -111,6 +121,16 @@ impl FakeForge {
     pub fn gitlab_mr_list(&self, project: &str, branch: &str, reply: Reply<'_>) {
         self.put(
             &format!("glab/{}/mr-list/{}.json", slug(project), slug(branch)),
+            reply,
+        );
+    }
+
+    /// Answer for the GitLab merge request list that targets `branch` in
+    /// `project` (`target_branch`, no `source_branch`), as the stack walk
+    /// lists children.
+    pub fn gitlab_mr_list_base(&self, project: &str, branch: &str, reply: Reply<'_>) {
+        self.put(
+            &format!("glab/{}/mr-list-base/{}.json", slug(project), slug(branch)),
             reply,
         );
     }
@@ -247,8 +267,10 @@ mod tests {
         let forge = FakeForge::new(&root);
         let project = "acme/services/api";
         forge.github_pr_list("acme/app", "feature/x", Reply::Json("[gh-list]"));
+        forge.github_pr_list_base("acme/app", "feature/x", Reply::Json("[gh-children]"));
         forge.github_pr_view("acme/app", 7, Reply::Json("{gh-view}"));
         forge.gitlab_mr_list(project, "feature/x", Reply::Json("[glab-list]"));
+        forge.gitlab_mr_list_base(project, "feature/x", Reply::Json("[glab-children]"));
         forge.gitlab_mr(project, 3, Reply::Json("{glab-mr}"));
         forge.gitlab_approvals(project, 3, Reply::Json("{glab-approvals}"));
         forge.gitlab_pipeline_jobs(project, 99, Reply::Json("[glab-jobs]"));
@@ -268,6 +290,23 @@ mod tests {
         let short = ["pr", "list", "-R", "acme/app", "--head", "feature/x"];
         let (code, out, _) = run(&forge, "gh", &[&short[..], &["--state", "all"]].concat());
         assert_eq!((code, out.as_str()), (0, "[gh-list]"), "-R owner/repo");
+        // `--base` with no `--head` lists the PRs that target the branch.
+        let children = [
+            "pr",
+            "list",
+            "-R",
+            "github.com/acme/app",
+            "--base",
+            "feature/x",
+            "--state",
+            "open",
+        ];
+        let (code, out, _) = run(&forge, "gh", &children);
+        assert_eq!(
+            (code, out.as_str()),
+            (0, "[gh-children]"),
+            "gh pr list --base"
+        );
         let view = [
             "pr",
             "view",
@@ -286,6 +325,10 @@ mod tests {
             (
                 format!("{base}/merge_requests?source_branch=feature%2Fx&state=all&per_page=30"),
                 "[glab-list]",
+            ),
+            (
+                format!("{base}/merge_requests?target_branch=feature%2Fx&state=opened&per_page=30"),
+                "[glab-children]",
             ),
             (format!("{base}/merge_requests/3"), "{glab-mr}"),
             (
@@ -333,13 +376,13 @@ mod tests {
         assert_eq!((code, out.as_str(), err.as_str()), (0, "{gh-view-2}", ""));
 
         let calls = forge.calls();
-        assert_eq!(calls.len(), 10, "one log line per call: {calls:?}");
+        assert_eq!(calls.len(), 12, "one log line per call: {calls:?}");
         assert_eq!(
             calls[0],
             "gh pr list -R github.com/acme/app --head feature/x --json a,b,c"
         );
         assert_eq!(
-            calls[4],
+            calls[6],
             format!("glab api --hostname gitlab.com {base}/merge_requests/3")
         );
         let _ = fs::remove_dir_all(&root);

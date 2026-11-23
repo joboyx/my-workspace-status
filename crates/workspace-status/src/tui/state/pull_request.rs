@@ -32,6 +32,16 @@
 //! PR drops the detail. A changed answer for the same PR keeps it and marks
 //! it for a new fetch, which the next peek, pin, or landed badge lookup
 //! with the popover open asks for.
+//!
+//! A badge lookup that finds a PR also walks its stacked PR chain
+//! ([`PrStack`], [`super::super::pull_request::lookup_stack`]) in the same
+//! job. The stack is cached beside the answer, per (remote URL, branch),
+//! and lives as long as the answer: a branch switch or a vanished checkout
+//! prunes it, `r` and a poll keep it on screen until the new walk lands,
+//! and no PR or an answer that names another PR drops it. A failed walk
+//! keeps the last stack and adds no toast or outage (the badge lookup owns
+//! forge outages). `gx` / `gc` look the PR up without a walk, so they keep
+//! the stack of the same PR.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -53,8 +63,8 @@ use super::super::pr_poll::{
 use super::super::pr_status::PrState;
 use super::super::pull_request::{
     ci_opened_status, commit_url, default_branch_status, is_web_url, lookup_failed_status,
-    no_ci_status, no_pr_status, parse_remote, Forge, PrDetailLookup, PrLookup, PrPage, PullRequest,
-    PullRequestDetail, CI_OPEN_FAILED, NO_PR_FOR_ROW, OPEN_FAILED, PR_LOOKUP_RUNNING,
+    no_ci_status, no_pr_status, parse_remote, Forge, PrDetailLookup, PrLookup, PrPage, PrStack,
+    PullRequest, PullRequestDetail, CI_OPEN_FAILED, NO_PR_FOR_ROW, OPEN_FAILED, PR_LOOKUP_RUNNING,
 };
 use super::super::status::StatusMessage;
 use super::super::toast::{Toast, ToastMark, PR_TOAST_TTL_MS, TOAST_MAX};
@@ -173,16 +183,20 @@ impl CheckoutPr {
     }
 
     /// True when a poll cycle may look this record up, given the snapshot
-    /// row's upstream: a GitHub or GitLab remote, and a last lookup that
-    /// failed, an open PR, or no PR known yet on a branch that was pushed.
-    /// A merged PR is not polled once its lookup works. A failed lookup is
-    /// polled until it succeeds, whatever the upstream or the PR state, so
-    /// the outage of its forge host can end ([`AppState::settle_pr_outages`]).
-    fn pollable(&self, has_upstream: bool) -> bool {
+    /// row's upstream and whether its stored stack holds a member that is
+    /// not merged ([`PrCache::stack_open`]): a GitHub or GitLab remote, and
+    /// a last lookup that failed, an open PR, a merged PR with an open
+    /// stack, or no PR known yet on a branch that was pushed. A merged PR
+    /// is not polled once its lookup works and every member of its stack
+    /// is merged (or it has none): its walk keeps the open members of the
+    /// chain current until then. A failed lookup is polled until it
+    /// succeeds, whatever the upstream or the PR state, so the outage of
+    /// its forge host can end ([`AppState::settle_pr_outages`]).
+    fn pollable(&self, has_upstream: bool, open_stack: bool) -> bool {
         self.host.is_some()
             && (self.failure.is_some()
                 || match self.pr_state {
-                    Some(PrState::Merged) => false,
+                    Some(PrState::Merged) => open_stack,
                     Some(_) => true,
                     None => has_upstream,
                 })
@@ -522,6 +536,10 @@ pub(crate) struct PrCache {
     checkouts: HashMap<PathBuf, CheckoutPr>,
     /// (remote URL, branch) to the forge's answer.
     answers: HashMap<(String, String), BranchPr>,
+    /// (remote URL, branch) to the stacked PR chain of the PR its answer
+    /// names. Only an answer that names a PR has one, and its
+    /// [`PrStack::this`] member is that PR ([`Self::sync_stack`]).
+    stacks: HashMap<(String, String), PrStack>,
     /// (remote URL, branch) to the detail of the PR its answer names.
     details: HashMap<(String, String), PrDetailState>,
     /// (remote URL, branch) of details that wait for a new fetch.
@@ -576,7 +594,8 @@ impl PrCache {
         self.checkouts.get(checkout)?.remote.as_deref()
     }
 
-    /// Drop answers and details that no checkout points at any more.
+    /// Drop answers, stacks, and details that no checkout points at any
+    /// more.
     fn prune_answers(&mut self) {
         let live: HashSet<(&str, &str)> = self
             .checkouts
@@ -587,6 +606,7 @@ impl PrCache {
             live.contains(&(remote.as_str(), branch.as_str()))
         };
         self.answers.retain(|key, _| keep(key));
+        self.stacks.retain(|key, _| keep(key));
         self.details.retain(|key, _| keep(key));
         self.detail_refresh.retain(|key, _| keep(key));
     }
@@ -619,6 +639,9 @@ impl PrCache {
     /// An answer that names another PR (number or URL), or no PR, drops the
     /// detail, which described the old one. A changed answer for the same
     /// PR keeps the detail on screen and marks it for a new fetch.
+    ///
+    /// The stack of `key` follows the answer ([`Self::sync_stack`]): no PR
+    /// or another PR drops it, the same PR keeps it.
     fn set_answer(&mut self, key: (String, String), answer: BranchPr) {
         let old = self.answers.get(&key);
         if old != Some(&answer) {
@@ -628,7 +651,64 @@ impl PrCache {
                 self.mark_detail_for_refresh(&key);
             }
         }
-        self.answers.insert(key, answer);
+        self.answers.insert(key.clone(), answer);
+        self.sync_stack(&key);
+    }
+
+    /// Keep the stack of `key` in step with its answer: drop it unless the
+    /// answer names the PR the stack was walked for (same URL), and give
+    /// it that answer's fresh copy of the PR, so a kept stack never shows
+    /// an older state of the PR the badge shows.
+    fn sync_stack(&mut self, key: &(String, String)) {
+        let Some(stack) = self.stacks.get_mut(key) else {
+            return;
+        };
+        let pr = match self.answers.get(key) {
+            Some(BranchPr::Ready(Some(pr))) => pr,
+            Some(BranchPr::Ready(None) | BranchPr::Failed) | None => {
+                self.stacks.remove(key);
+                return;
+            }
+        };
+        match stack.members.get_mut(stack.this) {
+            Some(this) if this.url == pr.url => this.clone_from(pr),
+            Some(_) | None => {
+                self.stacks.remove(key);
+            }
+        }
+    }
+
+    /// Land the stack walk of a badge lookup for `key`, after its answer
+    /// landed: `Some(stack)` replaces the stack, `None` (no chain) drops
+    /// it. A walk for another PR than the answer names is dropped
+    /// ([`Self::sync_stack`]).
+    fn set_stack(&mut self, key: (String, String), stack: Option<PrStack>) {
+        match stack {
+            Some(stack) => {
+                self.stacks.insert(key.clone(), stack);
+                self.sync_stack(&key);
+            }
+            None => {
+                self.stacks.remove(&key);
+            }
+        }
+    }
+
+    /// True when the stored stack of `record` (its remote and branch) holds
+    /// a member that is not merged, so a merged PR there still needs polls
+    /// to keep that member's state current ([`CheckoutPr::pollable`]).
+    fn stack_open(&self, record: &CheckoutPr) -> bool {
+        let Some(remote) = record.remote.as_ref() else {
+            return false;
+        };
+        self.stacks
+            .get(&(remote.clone(), record.branch.clone()))
+            .is_some_and(|stack| {
+                stack
+                    .members
+                    .iter()
+                    .any(|member| member.state != PrState::Merged)
+            })
     }
 
     /// True when a poll of a checkout on `host` may run at `now`, with poll
@@ -682,7 +762,9 @@ impl PrCache {
     /// time, and may queue a transition. A failure records its reason and
     /// keeps the last answer when there is one (the badge stays); a failed
     /// poll also backs the host off. The result says what the outage of
-    /// the forge host learns ([`AppState::note_pr_landing`]).
+    /// the forge host learns ([`AppState::note_pr_landing`]). The answer
+    /// keeps the last stack of the same PR ([`Self::set_answer`]); the
+    /// caller lands a new walk after it ([`Self::set_stack`]).
     fn land(
         &mut self,
         checkout: &Path,
@@ -924,9 +1006,10 @@ impl AppState {
                 self.status = StatusMessage::warn(no_ci_status(&pr_ref));
                 return Effect::None;
             }
-            return Effect::OpenPullRequestCi {
+            return Effect::OpenKnownPullRequest {
                 pr_ref,
                 url: pr.ci_link.url.clone(),
+                page: PrPage::Ci,
             };
         }
         if self.pr_checked_at(&repo).is_some() {
@@ -1294,7 +1377,10 @@ impl AppState {
     /// first lookup for that branch landed with a GitHub or GitLab remote,
     /// and either its answer is an open PR, or no PR is known yet and the
     /// branch has an upstream (it was pushed), so a PR opened later shows.
-    /// A merged PR is not polled. A checkout whose last lookup failed is
+    /// A merged PR is not polled, unless its stored stack still holds a
+    /// member that is not merged: its stack walk then keeps that member's
+    /// state current, until every member is merged. A checkout whose last
+    /// lookup failed is
     /// polled until a lookup succeeds, also with no upstream or a merged
     /// PR, so a working forge ends its outage. Reads the facts each record keeps
     /// ([`CheckoutPr::pollable`], [`CheckoutPr::host`]); it parses no
@@ -1317,8 +1403,10 @@ impl AppState {
                     .get(path)
                     .filter(|record| record.branch == row.branch)?;
                 let host = record.host.as_deref()?;
-                let due = record.pollable(row.sync_status != SyncStatus::NoUpstream)
-                    && !record.in_flight
+                let due = record.pollable(
+                    row.sync_status != SyncStatus::NoUpstream,
+                    self.pr_cache.stack_open(record),
+                ) && !record.in_flight
                     && self.pr_cache.host_ready(host, now, interval);
                 due.then(|| (path.to_path_buf(), record.branch.clone()))
             })
@@ -1345,6 +1433,8 @@ impl AppState {
     /// and the lookup lands). The last answer seen stays too, so the new
     /// lookup can still queue a transition. The remote of a checkout on its
     /// default branch is resolved again too, and stays until that lands.
+    /// The stack stays with the answer until the new lookup and its walk
+    /// land ([`Self::apply_pr_badge_at`]).
     pub(crate) fn forget_pr_lookups(&mut self, repo: Option<&Path>) {
         let cache = &mut self.pr_cache;
         for (path, record) in &mut cache.default_remotes {
@@ -1373,9 +1463,11 @@ impl AppState {
         }
     }
 
-    /// Land a badge lookup of `branch` in checkout `repo`, now.
+    /// Land a badge lookup of `branch` in checkout `repo` with no stack
+    /// walk, now: the last stack of the same PR stays.
     ///
-    /// See [`Self::apply_pr_lookup_at`].
+    /// See [`Self::apply_pr_badge_at`].
+    #[cfg(test)]
     pub(crate) fn apply_pr_lookup(
         &mut self,
         repo: &Path,
@@ -1386,7 +1478,40 @@ impl AppState {
         self.apply_pr_lookup_at(repo, branch, remote, lookup, Instant::now())
     }
 
-    /// Land a badge lookup of `branch` in checkout `repo` at `now`.
+    /// Land a badge lookup of `branch` in checkout `repo` with no stack
+    /// walk, at `now`: the last stack of the same PR stays.
+    ///
+    /// See [`Self::apply_pr_badge_at`].
+    #[cfg(test)]
+    pub(crate) fn apply_pr_lookup_at(
+        &mut self,
+        repo: &Path,
+        branch: &str,
+        remote: Option<String>,
+        lookup: PrLookup,
+        now: Instant,
+    ) -> bool {
+        self.apply_pr_badge_at(repo, branch, remote, lookup, Err(None), now)
+    }
+
+    /// Land a badge lookup of `branch` in checkout `repo` and its stack
+    /// walk, now.
+    ///
+    /// See [`Self::apply_pr_badge_at`].
+    pub(crate) fn apply_pr_badge(
+        &mut self,
+        repo: &Path,
+        branch: &str,
+        remote: Option<String>,
+        lookup: PrLookup,
+        stack: Result<Option<PrStack>, Option<String>>,
+    ) -> bool {
+        self.apply_pr_badge_at(repo, branch, remote, lookup, stack, Instant::now())
+    }
+
+    /// Land a badge lookup of `branch` in checkout `repo` at `now`, with
+    /// `stack`, what the stack walk of the found PR answered
+    /// ([`super::super::pull_request::lookup_stack`]).
     ///
     /// Dropped when the checkout is on another branch now, or was forgotten
     /// since the lookup was queued. A failed lookup sets no status; it keeps
@@ -1396,12 +1521,19 @@ impl AppState {
     /// backs its forge host off. A success may queue a [`PrTransition`] and
     /// ends each outage no record fails on any more. Returns true when the
     /// cache changed.
-    pub(crate) fn apply_pr_lookup_at(
+    ///
+    /// The stack lands after a found PR: `Ok(Some)` stores it beside the
+    /// answer, `Ok(None)` (no chain) drops it. A failed walk (`Err`) keeps
+    /// the last stack of the same PR, with no status, toast, or outage. No
+    /// PR, or an answer that names another PR, drops the stack whatever
+    /// the walk said.
+    pub(crate) fn apply_pr_badge_at(
         &mut self,
         repo: &Path,
         branch: &str,
         remote: Option<String>,
         lookup: PrLookup,
+        stack: Result<Option<PrStack>, Option<String>>,
         now: Instant,
     ) -> bool {
         if self.snapshot_branch(repo) != Some(branch) {
@@ -1420,9 +1552,20 @@ impl AppState {
         };
         record.in_flight = false;
         let poll_cycle = record.poll_cycle.take();
+        // Only a found PR has a walk; any other answer already dropped or
+        // kept the stack with the answer.
+        let walked = match (&lookup, &remote, stack) {
+            (PrLookup::Found(_), Some(remote), Ok(stack)) => {
+                Some(((remote.clone(), branch.to_string()), stack))
+            }
+            _ => None,
+        };
         let landed = self
             .pr_cache
             .land(repo, branch, remote, lookup, poll_cycle, now);
+        if let (LandedLookup::Answered, Some((key, stack))) = (&landed, walked) {
+            self.pr_cache.set_stack(key, stack);
+        }
         self.note_pr_landing(landed, now);
         self.restore_popover_focus(focus);
         true
@@ -1461,7 +1604,7 @@ impl AppState {
     ) {
         self.status = match (&lookup, page) {
             (PrLookup::Found(pr), PrPage::Pr) if opened => {
-                StatusMessage::ok(format!("opened PR #{}", pr.number))
+                StatusMessage::ok(format!("opened PR {}", pr.ref_text()))
             }
             (PrLookup::Found(_), PrPage::Pr) => StatusMessage::error(OPEN_FAILED),
             (PrLookup::Found(pr), PrPage::Ci) if !is_web_url(&pr.ci_link.url) => {
@@ -1504,13 +1647,15 @@ impl AppState {
         }
     }
 
-    /// Land a `gc` open of the CI page of the known PR `pr_ref`: say
-    /// whether the browser started.
-    pub(crate) fn apply_pr_ci_open(&mut self, pr_ref: &str, opened: bool) {
-        self.status = if opened {
-            StatusMessage::ok(ci_opened_status(pr_ref))
-        } else {
-            StatusMessage::error(CI_OPEN_FAILED)
+    /// Land an open of `page` of the known PR `pr_ref`
+    /// ([`Effect::OpenKnownPullRequest`]): say whether the browser
+    /// started, as the `gx` and `gc` opens after a lookup say it.
+    pub(crate) fn apply_pr_known_open(&mut self, pr_ref: &str, page: PrPage, opened: bool) {
+        self.status = match (page, opened) {
+            (PrPage::Pr, true) => StatusMessage::ok(format!("opened PR {pr_ref}")),
+            (PrPage::Pr, false) => StatusMessage::error(OPEN_FAILED),
+            (PrPage::Ci, true) => StatusMessage::ok(ci_opened_status(pr_ref)),
+            (PrPage::Ci, false) => StatusMessage::error(CI_OPEN_FAILED),
         };
     }
 
@@ -1729,14 +1874,15 @@ impl AppState {
     }
 
     /// True when the badge of checkout `checkout` is stale at `now`: it
-    /// shows a polled (open) PR, and the last successful lookup is older
-    /// than twice the planned poll period ([`Self::pr_poll_interval_ms`]).
-    /// Never with polling off.
+    /// shows a polled PR (an open one, or a merged one whose stored stack
+    /// holds a member that is not merged, [`CheckoutPr::pollable`]), and
+    /// the last successful lookup is older than twice the planned poll
+    /// period ([`Self::pr_poll_interval_ms`]). Never with polling off.
     ///
-    /// Reads only that checkout's record (no snapshot scan, no remote
-    /// parse), so a painter can ask it for every row. The records follow
-    /// the snapshot through [`Self::due_pr_lookups`]; a painter asks only
-    /// for a badge it paints, which already matched the current branch.
+    /// Reads only that checkout's record and its stack (no snapshot scan,
+    /// no remote parse), so a painter can ask it for every row. The records
+    /// follow the snapshot through [`Self::due_pr_lookups`]; a painter asks
+    /// only for a badge it paints, which already matched the current branch.
     pub(crate) fn pr_is_stale(&self, checkout: &Path, now: Instant) -> bool {
         let Some(record) = self.pr_cache.checkouts.get(checkout) else {
             return false;
@@ -1744,7 +1890,7 @@ impl AppState {
         let polled_pr = record.host.is_some()
             && record
                 .pr_state
-                .is_some_and(|state| state != PrState::Merged);
+                .is_some_and(|state| state != PrState::Merged || self.pr_cache.stack_open(record));
         polled_pr
             && record.checked_at.is_some_and(|at| {
                 pr_answer_is_stale(
@@ -1756,8 +1902,9 @@ impl AppState {
 
     /// The PR badge of checkout `checkout` in a tree `tree_width` columns
     /// wide at `now`: the state of [`Self::pull_request_for`], its ref unless
-    /// the tree is narrower than [`PR_REF_MIN_TREE_COLS`], and whether it is
-    /// stale ([`Self::pr_is_stale`]). A failed lookup with no earlier answer
+    /// the tree is narrower than [`PR_REF_MIN_TREE_COLS`], its stack
+    /// position ([`Self::pr_stack`]) with the ref, and whether it is stale
+    /// ([`Self::pr_is_stale`]). A failed lookup with no earlier answer
     /// gives the failure mark alone ([`Self::pr_mark`]). `None` when the
     /// checkout shows no mark.
     pub(crate) fn tree_pr_badge(
@@ -1770,12 +1917,18 @@ impl AppState {
             return (self.pr_mark(checkout)? == PrMark::LookupFailed).then_some(PrBadge {
                 mark: PrMark::LookupFailed,
                 ref_text: None,
+                position: None,
                 stale: false,
             });
         };
+        let wide = tree_width >= PR_REF_MIN_TREE_COLS;
         Some(PrBadge {
             mark: PrMark::State(pr.state),
-            ref_text: (tree_width >= PR_REF_MIN_TREE_COLS).then(|| pr.ref_text()),
+            ref_text: wide.then(|| pr.ref_text()),
+            position: self
+                .pr_stack(checkout)
+                .filter(|_| wide)
+                .map(PrStack::position),
             stale: self.pr_is_stale(checkout, now),
         })
     }
@@ -1826,25 +1979,70 @@ impl AppState {
 
     /// The known PR that the PR of checkout `checkout` is stacked on
     /// ([`PullRequest::stacked_on`]): among the PRs of every visible
-    /// checkout whose remote is the same forge repository, with the
-    /// checkout's configured default branch.
+    /// checkout whose remote is the same forge repository, and the members
+    /// of the checkout's stack ([`Self::pr_stack`]), so a base that no
+    /// visible checkout has still counts. A PR both lists know is read from
+    /// the checkout, whose answer is the newer. The default branch is
+    /// [`Self::pr_stack_default_branch`].
     pub(crate) fn pr_stack_base(&self, checkout: &Path) -> Option<&PullRequest> {
         let pr = self.pull_request_for(checkout)?;
         let forge_repo = |path: &Path| parse_remote(self.pr_cache.remote_for(path)?);
         let repo = forge_repo(checkout)?;
-        let known: Vec<&PullRequest> = self
+        let mut known: Vec<&PullRequest> = self
             .pr_rows()
             .map(|row| Path::new(&row.repo))
             .filter(|path| forge_repo(path).as_ref() == Some(&repo))
             .filter_map(|path| self.pull_request_for(path))
             .collect();
-        let default_branch = self
+        if let Some(stack) = self.pr_stack(checkout) {
+            let members: Vec<&PullRequest> = stack
+                .members
+                .iter()
+                .filter(|member| known.iter().all(|pr| pr.url != member.url))
+                .collect();
+            known.extend(members);
+        }
+        pr.stacked_on(known, self.pr_stack_default_branch(checkout))
+    }
+
+    /// The stacked PR chain of the PR the badge of checkout `checkout`
+    /// shows ([`Self::pull_request_for`]), as its last stack walk found
+    /// it; `None` when that PR has no parent and no child, or no walk
+    /// landed yet.
+    pub(crate) fn pr_stack(&self, checkout: &Path) -> Option<&PrStack> {
+        self.pull_request_for(checkout)?;
+        let record = self.pr_cache.checkouts.get(checkout)?;
+        let key = (record.remote.clone()?, record.branch.clone());
+        self.pr_cache.stacks.get(&key)
+    }
+
+    /// The current answer of the first visible checkout whose badge shows
+    /// the PR with URL `url` ([`Self::pull_request_for`]); `None` for a
+    /// stack member no visible checkout has. A stack line reads a member
+    /// from here when it can, so it never shows an older state than that
+    /// checkout's badge.
+    pub(crate) fn checked_out_pr(&self, url: &str) -> Option<&PullRequest> {
+        self.pr_rows().find_map(|row| {
+            self.pull_request_for(Path::new(&row.repo))
+                .filter(|pr| pr.url == url)
+        })
+    }
+
+    /// Default branch of checkout `checkout` for the stack rule
+    /// ([`super::super::pr_status::can_stack_on`]): its configured
+    /// override, else its repository's known default branch
+    /// ([`WorkspaceRepoSnapshot::default_branch`]). The stack walk
+    /// ([`super::super::pull_request::lookup_stack`]) and
+    /// [`Self::pr_stack_base`] both read it.
+    pub(crate) fn pr_stack_default_branch(&self, checkout: &Path) -> Option<&str> {
+        let row = self
             .snapshot
             .repos
             .iter()
-            .find(|row| Path::new(&row.repo) == checkout)
-            .and_then(|row| row.default_branch_override.as_deref());
-        pr.stacked_on(known, default_branch)
+            .find(|row| Path::new(&row.repo) == checkout)?;
+        row.default_branch_override
+            .as_deref()
+            .or(row.default_branch.as_deref())
     }
 
     /// Take the queued [`PrTransition`]s, oldest first.

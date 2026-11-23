@@ -667,6 +667,156 @@ mod pr {
         }
     }
 
+    /// The chain `6 → 7 → 8` at `remote`: `c0` has 7, `c1` has 8, and no
+    /// checkout has 6. Both badges landed with their stack walk.
+    fn chain_app(remote: &str) -> (AppState, [PullRequest; 3], &'static str) {
+        let (base_url, sign) = if remote == GH_REMOTE {
+            ("https://github.com/acme/app/pull", "#")
+        } else {
+            ("https://gitlab.com/acme/services/api/-/merge_requests", "!")
+        };
+        let member = |number: u64, head: &str, base: &str, state: PrState| {
+            let mut pr = PullRequest::fixture(number, &format!("{base_url}/{number}"), state);
+            pr.head = head.into();
+            pr.base = base.into();
+            pr
+        };
+        let chain = [
+            member(6, "feature/token-store", "main", PrState::InReview),
+            member(
+                7,
+                "feature/auth-refresh",
+                "feature/token-store",
+                PrState::Ready,
+            ),
+            member(
+                8,
+                "feature/login-page",
+                "feature/auth-refresh",
+                PrState::CiFailed,
+            ),
+        ];
+        let mut app = app_state(&[
+            checkout("c0", &chain[1].head),
+            checkout("c1", &chain[2].head),
+        ]);
+        let _ = app.due_pr_lookups();
+        for (name, this) in [("c0", 1), ("c1", 2)] {
+            let pr = &chain[this];
+            assert!(app.apply_pr_badge(
+                Path::new(name),
+                &pr.head,
+                Some(remote.into()),
+                PrLookup::Found(pr.clone()),
+                Ok(Some(PrStack {
+                    members: chain.to_vec(),
+                    this,
+                })),
+            ));
+        }
+        (app, chain, sign)
+    }
+
+    #[test]
+    fn a_stack_lists_the_whole_chain_and_marks_this_pr_on_both_forges() {
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let (mut app, chain, sign) = chain_app(remote);
+            let section = section_of(&mut app, "c0", None);
+            let lines = texts(&section);
+            let want = [
+                format!("stack:   1/3 P {sign}6 in review · not checked out"),
+                format!(": > 2/3 A {sign}7 ready to merge"),
+                format!(":   3/3 x {sign}8 CI failed"),
+            ];
+            let first = lines
+                .iter()
+                .position(|line| *line == want[0])
+                .unwrap_or_else(|| panic!("{remote}: {lines:?}"));
+            assert_eq!(lines[first..first + 3], want, "{remote}: chain order");
+            assert!(
+                !lines.iter().any(|line| line.starts_with("stack: after")),
+                "the chain replaces the one-line stack: {lines:?}"
+            );
+            let at = |text: &str| lines.iter().position(|line| line.starts_with(text));
+            assert!(at("next") < Some(first) && Some(first + 2) < at("checked"));
+            assert!(
+                lines.contains(&format!("next: > merge {sign}6 first")),
+                "a parent no checkout has is still the base: {lines:?}"
+            );
+
+            // This PR's line is bold all through, its mark in the ref colour;
+            // each line paints in its member's badge colour.
+            let this_value = format!("2/3 A {sign}7 ready to merge");
+            assert_eq!(
+                style_of(&section, &want[1]),
+                (SegRole::Added, this_value.len())
+            );
+            assert_eq!(mark_role_of(&section, &want[1]), Some(SegRole::Repo));
+            assert_eq!(style_of(&section, &want[0]), (SegRole::BranchDefault, 0));
+            assert_eq!(style_of(&section, &want[2]), (SegRole::Deleted, 0));
+
+            // Each line links to its member's PR, and `y` copies that URL.
+            for (text, pr) in want.iter().zip(&chain) {
+                let line = field_of(&section, text);
+                assert!(
+                    matches!(line, PopoverLine::Field { link: Some(url), .. } if *url == pr.url),
+                    "{text}: {line:?}"
+                );
+                assert_eq!(line.copy_text(), pr.url, "{text}");
+            }
+
+            // The other checkout's popover marks its own line.
+            let lines = texts(&section_of(&mut app, "c1", None));
+            assert!(
+                lines.contains(&format!(": > 3/3 x {sign}8 CI failed")),
+                "{remote}: {lines:?}"
+            );
+            assert!(lines.contains(&format!(":   2/3 A {sign}7 ready to merge")));
+
+            // Unicode: the badge glyphs and the `▸` mark.
+            app.ascii = false;
+            let lines = texts(&section_of(&mut app, "c0", None));
+            assert!(
+                lines.contains(&format!(
+                    "stack:   1/3 ○ {sign}6 in review · not checked out"
+                )) && lines.contains(&format!(": ▸ 2/3 ◉ {sign}7 ready to merge")),
+                "{remote}: {lines:?}"
+            );
+        }
+    }
+
+    /// A chain line of a member that a visible checkout has reads that
+    /// checkout's current answer, not the older copy of the stack walk, so
+    /// it never shows an older state than that checkout's badge.
+    #[test]
+    fn a_chain_line_takes_the_fresher_state_of_the_checkout_that_has_the_member() {
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let (mut app, chain, sign) = chain_app(remote);
+            // `c1` (#8) lands a newer answer; `c0`'s walk still says CI failed.
+            let ready = PullRequest {
+                state: PrState::Ready,
+                ..chain[2].clone()
+            };
+            assert!(app.apply_pr_lookup(
+                Path::new("c1"),
+                &ready.head,
+                Some(remote.into()),
+                PrLookup::Found(ready.clone()),
+            ));
+            let stale = &app.pr_stack(Path::new("c0")).expect("stack").members[2];
+            assert_eq!(stale.state, PrState::CiFailed, "{remote}: walk copy");
+            let lines = texts(&section_of(&mut app, "c0", None));
+            assert!(
+                lines.contains(&format!(":   3/3 A {sign}8 ready to merge")),
+                "{remote}: {lines:?}"
+            );
+            assert!(
+                !lines.iter().any(|line| line.contains("CI failed")),
+                "{remote}: {lines:?}"
+            );
+        }
+    }
+
     #[test]
     fn conflicts_and_threads_show_as_notes_and_the_next_step() {
         for (remote, mut pr) in forges(PrState::InReview) {

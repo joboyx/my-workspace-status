@@ -297,6 +297,12 @@ fn gitlab_mr_json(
     )
 }
 
+/// GitLab merge request list answer: one merge request in `badge` with
+/// `text`, with no `head_pipeline`, like the real list.
+pub fn gitlab_list_json(iid: u64, branch: &str, badge: Badge, text: PrText<'_>) -> String {
+    format!("[{}]", gitlab_mr_json(iid, branch, badge, text, false))
+}
+
 /// Make every `glab api` answer for merge request `iid` on `branch` in
 /// `project` the merge request in `badge`.
 ///
@@ -356,10 +362,7 @@ fn put_gitlab_edited(
     forge.gitlab_mr_list(
         project,
         branch,
-        Reply::Json(&format!(
-            "[{}]",
-            edit(gitlab_mr_json(iid, branch, badge, text, false))
-        )),
+        Reply::Json(&edit(gitlab_list_json(iid, branch, badge, text))),
     );
     forge.gitlab_mr(
         project,
