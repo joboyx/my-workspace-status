@@ -185,7 +185,8 @@ Scenario sets live in `.agents/skills/verify-workspace-status/scenarios/`. Apply
 | `github-none`, `gitlab-none` | The forge answers with an empty list: no PR. |
 | `context-none` | The `context` branches (`feature/login-page`, `feature/reconciliation`) answer an empty list. With `github-none` and `gitlab-none`, no seeded branch has a PR. |
 | `github-cli-fails`, `gitlab-cli-fails` | The CLI exits 1 with one stderr line. |
-| `prs-tab` | Every seeded branch gets a PR whose title carries a ticket key, for the PRs tab groups: #7 CI failed and #8 stacked on it (`ABC-123`), !5 CI running (`ABC-125`), #12 merged (`ABC-120`). List and detail answers. |
+| `prs-tab` | Every seeded branch gets a PR whose title carries a ticket key, for the PRs tab groups: #7 CI failed and #8 stacked on it (`ABC-123`), !5 CI running (`ABC-125`), #12 merged (`ABC-120`). List and detail answers, and the stack walk's children lists (`feature/auth-refresh` → `[#8]`, every other head `[]`), so #7 and #8 are the chain `1/2`, `2/2`. `main` answers no PR (a primary moved to `main`, PT15). |
+| `stack` | Overlay on `prs-tab`: chain members that no checkout has, in both directions. GitHub `acme/app` #6 `feature/token-store` → `main` (open, root), #7 with its base moved to `feature/token-store`, #8, and #9 `feature/login-copy` → `feature/login-page` (open draft): chain 6 → 7 → 8 → 9, badges `#7 2/4 x`, `#8 3/4 P`. GitLab `acme/services/api` !4 `feature/quota-store` → `main` (open, root), !5 with its base moved to `feature/quota-store`, !6 `feature/rate-limit-docs` → `feature/rate-limit` (open): chain 4 → 5 → 6, badge `!5 2/3 r`. Every leaf's children list is `[]`. |
 
 A set directory has the layout of a forge directory, so `scenario` is a copy that renames each file into place and removes a stale failure file. Add a set by adding a directory.
 
@@ -207,4 +208,4 @@ Start without `--fake-forge`, on a fixture whose `origin` is a public repo. The 
 
 ## Features
 
-[features/README.md](features/README.md) lists every feature file in sweep order. Each file lists steps, the screen text to expect, and what counts as PASS. The forge files need the PR status visuals (six states, ref beside the glyph, `gc`, polling, toasts), the `prs-tab` checks need the PRs tab, PO3 needs the commit popovers, and PS7, PS9 and PT7 need the outage toast and the header failure mark; on an older build they are SKIP.
+[features/README.md](features/README.md) lists every feature file in sweep order. Each file lists steps, the screen text to expect, and what counts as PASS. The forge files need the PR status visuals (six states, ref beside the glyph, `gc`, polling, toasts), the `prs-tab` checks need the PRs tab, PO3 needs the commit popovers, PS7, PS9 and PT7 need the outage toast and the header failure mark, and PS10 and PT12 to PT15 need the stacked PR chain (the stack position, stack-only rows); on an older build they are SKIP.

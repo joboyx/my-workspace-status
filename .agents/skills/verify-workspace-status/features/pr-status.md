@@ -313,6 +313,28 @@ $V capture "$RUN" outage-again
 
 **PASS:** step 1 shows the `glab` toast, the header mark, `#7 P`, and a lone `!` on the `services/api` row (the `.ansi` capture paints it bold red), with no `gh` toast; step 2 prints `PASS no second toast` and keeps the header mark; step 3 shows `!5 P` with no header mark; step 4 shows the toast and the header mark again while `!5 P` stays. A full reload (`r` on the workspace row) behaves like step 2: it never ends an outage. PTY proof: `pty_pr_failing_host_toasts_once_per_outage_and_marks_the_badge`.
 
+## PS10 Stack position on the badge, both forges
+
+A PR in a stacked chain (its base is another open PR's head branch, or an open PR targets its head) paints its position in the chain between the ref and the glyph: `<ref> <pos>/<len> <glyph>`, muted, with the glyph still the last tree cell. The badge lookup walks the chain in both directions, also through PRs no checkout has. The `stack` set (an overlay on `prs-tab`) gives two chains with members no checkout has: GitHub `#6` → `#7` → `#8` → `#9` (`#6` and the draft `#9` not checked out) and GitLab `!4` → `!5` → `!6` (`!4` and `!6` not checked out); `SKILL.md`, **Fake forge**.
+
+```bash
+fresh prs-tab stack -- --fake-forge "$FORGE"
+$V wait --regex "$RUN" '#7 2/4 x($|[^[:alnum:]])' && $V wait --regex "$RUN" '#8 3/4 P($|[^[:alnum:]])'
+$V wait --regex "$RUN" '!5 2/3 r($|[^[:alnum:]])' && $V wait --regex "$RUN" '#12 m($|[^[:alnum:]])'
+$V capture "$RUN" stack-badges | grep -cE '#12 [0-9]+/[0-9]+' || true   # 0: a PR with no chain has no position
+CALLS=$($V calls "$RUN")
+grep -qF -- '--head feature/token-store' <<<"$CALLS" && grep -qF -- '--base feature/login-page' <<<"$CALLS" &&
+  grep -qF 'source_branch=feature%2Fquota-store&' <<<"$CALLS" && grep -qF 'target_branch=feature%2Frate-limit&' <<<"$CALLS" &&
+  echo "PASS the walk asked parents and children on both forges"
+fresh prs-tab stack -- --env WS_STATUS_GLYPHS=nerd --fake-forge "$FORGE"
+$V wait "$RUN" '#7 ⧗2/4 ✕' && $V wait "$RUN" '#8 ⧗3/4 ○' && $V wait "$RUN" '!5 ⧗2/3 ◐'
+$V capture "$RUN" stack-badges-nerd
+```
+
+Expect on `stack-badges`: the `app` row `& feature/auth-refresh` ends in `#7 2/4 x`, the worktree row `L feature/login-page` in `#8 3/4 P`, the `services/api` row in `!5 2/3 r`, and both `merger` rows in `#12 m` (no position: no chain). The `.ansi` capture paints the position muted. With `prs-tab` alone the GitHub chain is `#7` → `#8`, so the rows read `#7 1/2 x` and `#8 2/2 P`, and `!5 r` has no position.
+
+**PASS:** the four waits pass, the `grep -c` prints `0`, the calls line prints PASS, and the `stack-badges-nerd` capture shows `#7 ⧗2/4 ✕`, `#8 ⧗3/4 ○` and `!5 ⧗2/3 ◐`, each glyph in the last tree column. PTY proof: `pty_pr_stack_badge_marks_the_position_on_both_forges`.
+
 ## Live
 
 Real `gh` and `glab` against public repos, read-only. Needs `gh`, `glab`, `jq` and `git` on `PATH`, `gh auth status` and `glab auth status` passing, and network. Pick the branches at run time, so the recipe does not rot when a PR closes. The Setup helpers above are used here too.

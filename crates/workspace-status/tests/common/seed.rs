@@ -462,6 +462,29 @@ pub fn seed_primary_and_linked_family(workspace: &Path) {
     git(&linked, &["commit", "-q", "-m", "linked open"]);
 }
 
+/// Primary checkout `name` on `main` plus a linked worktree at
+/// `name/.worktrees/<linked_dir>` on a new branch `linked_branch`, made from
+/// `main`. The `.worktrees/` directory is ignored, so the primary stays
+/// clean.
+pub fn seed_primary_on_main_with_worktree(
+    workspace: &Path,
+    name: &str,
+    linked_dir: &str,
+    linked_branch: &str,
+) {
+    seed_repo(workspace, name, "main", false);
+    let repo = workspace.join(name);
+    fs::write(repo.join(".gitignore"), ".worktrees/\n").unwrap();
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "-q", "-m", "ignore linked worktree dir"]);
+    fs::create_dir_all(repo.join(".worktrees")).unwrap();
+    let path = format!(".worktrees/{linked_dir}");
+    git(
+        &repo,
+        &["worktree", "add", "-q", "-b", linked_branch, &path, "main"],
+    );
+}
+
 /// Off-default hidden primary `app` plus linked worktree, and a visible `lib`.
 ///
 /// Config `hiddenPaths: ["app"]`. Cold TUI start must hide the family; `.`
