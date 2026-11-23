@@ -586,6 +586,17 @@ fn open_result_sets_status_and_refreshes_the_cache() {
     );
     assert_eq!(app.status, "no PR for feature");
     assert_eq!(app.pr_badge(path), None, "fresh answer replaces the badge");
+
+    // A merge request says its GitLab ref, as an open of a known one does.
+    app.apply_pr_open(
+        path,
+        "feature",
+        Some(GL_REMOTE.into()),
+        open_on(GL_REMOTE, 4),
+        PrPage::Pr,
+        true,
+    );
+    assert_eq!(app.status, "opened PR !4");
 }
 
 /// Screen row of tree row `id` with the default layout (no scroll).
@@ -3871,5 +3882,75 @@ fn the_stack_default_branch_is_the_override_else_the_known_default() {
         let _ = app.due_pr_lookups();
         land_stack(&mut app, GH_REMOTE, this.clone(), Ok(Some(stack.clone())));
         assert_eq!(app.pr_stack_base(Path::new("app")), want, "{known:?}");
+    }
+}
+
+/// The chain of [`chain`] with this PR (#8) merged and the other members
+/// in `others`.
+fn merged_chain(remote: &str, others: PrState) -> PrStack {
+    let mut stack = chain(remote);
+    for (at, member) in stack.members.iter_mut().enumerate() {
+        member.state = if at == stack.this {
+            PrState::Merged
+        } else {
+            others
+        };
+    }
+    stack
+}
+
+/// A merged PR whose stack still holds an open member is polled and its
+/// badge can go stale, so its walk keeps that member current; once every
+/// member is merged, or the stack is gone, it is not polled.
+#[test]
+fn a_merged_pr_with_an_open_stack_member_is_polled_until_the_chain_is_merged() {
+    for remote in [GH_REMOTE, GL_REMOTE] {
+        let mut app = stack_app();
+        let path = Path::new("app");
+        let t0 = Instant::now();
+        let open = merged_chain(remote, PrState::InReview);
+        let this = open.members[open.this].clone();
+        assert!(app.apply_pr_badge_at(
+            path,
+            "feature",
+            Some(remote.into()),
+            PrLookup::Found(this.clone()),
+            Ok(Some(open)),
+            t0,
+        ));
+        assert_eq!(polled(&mut app, t0 + secs(180)), ["app"], "{remote}");
+        assert!(!app.pr_is_stale(path, t0 + secs(360)), "{remote}");
+        assert!(
+            app.pr_is_stale(path, t0 + secs(361)),
+            "{remote}: an open stack member goes stale"
+        );
+
+        let t1 = t0 + secs(400);
+        assert!(app.apply_pr_badge_at(
+            path,
+            "feature",
+            Some(remote.into()),
+            PrLookup::Found(this.clone()),
+            Ok(Some(merged_chain(remote, PrState::Merged))),
+            t1,
+        ));
+        assert!(
+            polled(&mut app, t1 + secs(9999)).is_empty(),
+            "{remote}: every member merged"
+        );
+        assert!(!app.pr_is_stale(path, t1 + secs(9999)), "{remote}");
+
+        assert!(app.apply_pr_badge_at(
+            path,
+            "feature",
+            Some(remote.into()),
+            PrLookup::Found(this),
+            Ok(None),
+            t1,
+        ));
+        assert!(
+            polled(&mut app, t1 + secs(9999)).is_empty(),
+            "{remote}: no stack"
+        );
     }
 }

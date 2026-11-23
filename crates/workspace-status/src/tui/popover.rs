@@ -1584,6 +1584,10 @@ fn pr_stack_fields(
     let ascii = state.ascii;
     let len = stack.members.len();
     for (at, member) in stack.members.iter().enumerate() {
+        // A member a visible checkout has reads that checkout's current
+        // answer, which can be newer than the stack walk.
+        let checked_out = state.checked_out_pr(&member.url);
+        let member = checked_out.unwrap_or(member);
         let (glyph, role) = pr_badge_mark(ascii, member.state);
         let mut value = format!(
             "{}/{len} {glyph} {} {}",
@@ -1591,7 +1595,7 @@ fn pr_stack_fields(
             member.ref_text(),
             member.state.label()
         );
-        if !state.pr_url_checked_out(&member.url) {
+        if checked_out.is_none() {
             value.push_str(PR_NOT_CHECKED_OUT);
         }
         let this = member.url == this_url;

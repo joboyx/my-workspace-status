@@ -183,16 +183,20 @@ impl CheckoutPr {
     }
 
     /// True when a poll cycle may look this record up, given the snapshot
-    /// row's upstream: a GitHub or GitLab remote, and a last lookup that
-    /// failed, an open PR, or no PR known yet on a branch that was pushed.
-    /// A merged PR is not polled once its lookup works. A failed lookup is
-    /// polled until it succeeds, whatever the upstream or the PR state, so
-    /// the outage of its forge host can end ([`AppState::settle_pr_outages`]).
-    fn pollable(&self, has_upstream: bool) -> bool {
+    /// row's upstream and whether its stored stack holds a member that is
+    /// not merged ([`PrCache::stack_open`]): a GitHub or GitLab remote, and
+    /// a last lookup that failed, an open PR, a merged PR with an open
+    /// stack, or no PR known yet on a branch that was pushed. A merged PR
+    /// is not polled once its lookup works and every member of its stack
+    /// is merged (or it has none): its walk keeps the open members of the
+    /// chain current until then. A failed lookup is polled until it
+    /// succeeds, whatever the upstream or the PR state, so the outage of
+    /// its forge host can end ([`AppState::settle_pr_outages`]).
+    fn pollable(&self, has_upstream: bool, open_stack: bool) -> bool {
         self.host.is_some()
             && (self.failure.is_some()
                 || match self.pr_state {
-                    Some(PrState::Merged) => false,
+                    Some(PrState::Merged) => open_stack,
                     Some(_) => true,
                     None => has_upstream,
                 })
@@ -688,6 +692,23 @@ impl PrCache {
                 self.stacks.remove(&key);
             }
         }
+    }
+
+    /// True when the stored stack of `record` (its remote and branch) holds
+    /// a member that is not merged, so a merged PR there still needs polls
+    /// to keep that member's state current ([`CheckoutPr::pollable`]).
+    fn stack_open(&self, record: &CheckoutPr) -> bool {
+        let Some(remote) = record.remote.as_ref() else {
+            return false;
+        };
+        self.stacks
+            .get(&(remote.clone(), record.branch.clone()))
+            .is_some_and(|stack| {
+                stack
+                    .members
+                    .iter()
+                    .any(|member| member.state != PrState::Merged)
+            })
     }
 
     /// True when a poll of a checkout on `host` may run at `now`, with poll
@@ -1356,7 +1377,10 @@ impl AppState {
     /// first lookup for that branch landed with a GitHub or GitLab remote,
     /// and either its answer is an open PR, or no PR is known yet and the
     /// branch has an upstream (it was pushed), so a PR opened later shows.
-    /// A merged PR is not polled. A checkout whose last lookup failed is
+    /// A merged PR is not polled, unless its stored stack still holds a
+    /// member that is not merged: its stack walk then keeps that member's
+    /// state current, until every member is merged. A checkout whose last
+    /// lookup failed is
     /// polled until a lookup succeeds, also with no upstream or a merged
     /// PR, so a working forge ends its outage. Reads the facts each record keeps
     /// ([`CheckoutPr::pollable`], [`CheckoutPr::host`]); it parses no
@@ -1379,8 +1403,10 @@ impl AppState {
                     .get(path)
                     .filter(|record| record.branch == row.branch)?;
                 let host = record.host.as_deref()?;
-                let due = record.pollable(row.sync_status != SyncStatus::NoUpstream)
-                    && !record.in_flight
+                let due = record.pollable(
+                    row.sync_status != SyncStatus::NoUpstream,
+                    self.pr_cache.stack_open(record),
+                ) && !record.in_flight
                     && self.pr_cache.host_ready(host, now, interval);
                 due.then(|| (path.to_path_buf(), record.branch.clone()))
             })
@@ -1578,7 +1604,7 @@ impl AppState {
     ) {
         self.status = match (&lookup, page) {
             (PrLookup::Found(pr), PrPage::Pr) if opened => {
-                StatusMessage::ok(format!("opened PR #{}", pr.number))
+                StatusMessage::ok(format!("opened PR {}", pr.ref_text()))
             }
             (PrLookup::Found(_), PrPage::Pr) => StatusMessage::error(OPEN_FAILED),
             (PrLookup::Found(pr), PrPage::Ci) if !is_web_url(&pr.ci_link.url) => {
@@ -1848,14 +1874,15 @@ impl AppState {
     }
 
     /// True when the badge of checkout `checkout` is stale at `now`: it
-    /// shows a polled (open) PR, and the last successful lookup is older
-    /// than twice the planned poll period ([`Self::pr_poll_interval_ms`]).
-    /// Never with polling off.
+    /// shows a polled PR (an open one, or a merged one whose stored stack
+    /// holds a member that is not merged, [`CheckoutPr::pollable`]), and
+    /// the last successful lookup is older than twice the planned poll
+    /// period ([`Self::pr_poll_interval_ms`]). Never with polling off.
     ///
-    /// Reads only that checkout's record (no snapshot scan, no remote
-    /// parse), so a painter can ask it for every row. The records follow
-    /// the snapshot through [`Self::due_pr_lookups`]; a painter asks only
-    /// for a badge it paints, which already matched the current branch.
+    /// Reads only that checkout's record and its stack (no snapshot scan,
+    /// no remote parse), so a painter can ask it for every row. The records
+    /// follow the snapshot through [`Self::due_pr_lookups`]; a painter asks
+    /// only for a badge it paints, which already matched the current branch.
     pub(crate) fn pr_is_stale(&self, checkout: &Path, now: Instant) -> bool {
         let Some(record) = self.pr_cache.checkouts.get(checkout) else {
             return false;
@@ -1863,7 +1890,7 @@ impl AppState {
         let polled_pr = record.host.is_some()
             && record
                 .pr_state
-                .is_some_and(|state| state != PrState::Merged);
+                .is_some_and(|state| state != PrState::Merged || self.pr_cache.stack_open(record));
         polled_pr
             && record.checked_at.is_some_and(|at| {
                 pr_answer_is_stale(
@@ -1989,13 +2016,15 @@ impl AppState {
         self.pr_cache.stacks.get(&key)
     }
 
-    /// True when a visible checkout's badge shows the PR with URL `url`
-    /// ([`Self::pull_request_for`]); false for a stack member no visible
-    /// checkout has.
-    pub(crate) fn pr_url_checked_out(&self, url: &str) -> bool {
-        self.pr_rows().any(|row| {
+    /// The current answer of the first visible checkout whose badge shows
+    /// the PR with URL `url` ([`Self::pull_request_for`]); `None` for a
+    /// stack member no visible checkout has. A stack line reads a member
+    /// from here when it can, so it never shows an older state than that
+    /// checkout's badge.
+    pub(crate) fn checked_out_pr(&self, url: &str) -> Option<&PullRequest> {
+        self.pr_rows().find_map(|row| {
             self.pull_request_for(Path::new(&row.repo))
-                .is_some_and(|pr| pr.url == url)
+                .filter(|pr| pr.url == url)
         })
     }
 

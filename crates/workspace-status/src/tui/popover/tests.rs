@@ -785,6 +785,38 @@ mod pr {
         }
     }
 
+    /// A chain line of a member that a visible checkout has reads that
+    /// checkout's current answer, not the older copy of the stack walk, so
+    /// it never shows an older state than that checkout's badge.
+    #[test]
+    fn a_chain_line_takes_the_fresher_state_of_the_checkout_that_has_the_member() {
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let (mut app, chain, sign) = chain_app(remote);
+            // `c1` (#8) lands a newer answer; `c0`'s walk still says CI failed.
+            let ready = PullRequest {
+                state: PrState::Ready,
+                ..chain[2].clone()
+            };
+            assert!(app.apply_pr_lookup(
+                Path::new("c1"),
+                &ready.head,
+                Some(remote.into()),
+                PrLookup::Found(ready.clone()),
+            ));
+            let stale = &app.pr_stack(Path::new("c0")).expect("stack").members[2];
+            assert_eq!(stale.state, PrState::CiFailed, "{remote}: walk copy");
+            let lines = texts(&section_of(&mut app, "c0", None));
+            assert!(
+                lines.contains(&format!(":   3/3 A {sign}8 ready to merge")),
+                "{remote}: {lines:?}"
+            );
+            assert!(
+                !lines.iter().any(|line| line.contains("CI failed")),
+                "{remote}: {lines:?}"
+            );
+        }
+    }
+
     #[test]
     fn conflicts_and_threads_show_as_notes_and_the_next_step() {
         for (remote, mut pr) in forges(PrState::InReview) {

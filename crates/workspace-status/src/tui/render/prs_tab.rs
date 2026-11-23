@@ -649,12 +649,17 @@ fn draw_prs_detail(
         bold: 0,
         mark: None,
     });
-    let actions = [
-        ("Enter", "Open PR"),
-        ("gc", row.pr.ci_link.kind.label()),
-        ("o", "Show in tree"),
-        ("y", "Copy URL"),
-    ];
+    // A stack-only row has no checkout to show, so it lists no `o` line
+    // (the key says `<ref> is not checked out`).
+    let actions: Vec<(&str, &str)> = [
+        Some(("Enter", "Open PR")),
+        Some(("gc", row.pr.ci_link.kind.label())),
+        row.checked_out.then_some(("o", "Show in tree")),
+        Some(("y", "Copy URL")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     // The title, one line per field, the rule, and the actions; the
     // vertical bar takes the last column while they overflow, and the
     // viewport is the PR's own (another PR starts at the top).
@@ -1733,6 +1738,15 @@ mod tests {
                     .any(|line| line.contains("checked ") && !line.contains("not checked")),
                 "{what}: no `checked` line for a stack-only PR"
             );
+            // The actions it can run; no checkout, so no Show in tree.
+            for line in [" Enter  Open PR", " gc  ", " y      Copy URL"] {
+                line_with(&detail, line);
+            }
+            assert!(
+                !detail.iter().any(|line| line.contains("Show in tree")),
+                "{what}: no `o` line for a stack-only PR:\n{}",
+                detail.join("\n")
+            );
             // This PR's line is bold; each chain line links to its PR.
             let buf = terminal.backend().buffer();
             let (y, _) = line_with(&text, "▸ 1/4 ○ #6");
@@ -1769,6 +1783,7 @@ mod tests {
                 "         ▸ 2/3 ◐ !5 CI running",
                 "           3/3 ◌ !6 draft · not checked out",
                 "checkout api · primary",
+                " o      Show in tree",
             ] {
                 assert!(
                     detail.iter().any(|row| row.contains(line)),

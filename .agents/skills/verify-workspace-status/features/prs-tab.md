@@ -87,7 +87,7 @@ top && walk '#7   acme'
 $V keys "$RUN" Enter && $V wait "$RUN" 'opened PR #7'
 $V keys "$RUN" g c && $V wait "$RUN" 'opened CI for #7'
 walk '#8   acme' 'v ABC-125' '!5   acme'
-$V keys "$RUN" Enter && $V wait "$RUN" 'opened PR #5'
+$V keys "$RUN" Enter && $V wait "$RUN" 'opened PR !5'
 $V keys "$RUN" g c && $V wait "$RUN" 'opened CI for !5'
 opened_is https://gitlab.com/acme/services/api/-/pipelines/9002   # the recorder can lag the status line
 cat "$RUN/opened.log"
@@ -252,12 +252,14 @@ $V capture "$RUN" stack-detail-7 | in_order 'stack      1/4 P #6 in review · no
 walk '#6   acme'
 $V wait "$RUN" 'checkout none (not checked out)'
 $V capture "$RUN" stack-detail-6 | in_order 'P #6 feat(ABC-123): Store auth tokens' 'next     > get review' 'stack    > 1/4 P #6 in review · not checked out' \
-  '2/4 x #7 CI failed' 'url      https://github.com/acme/app/pull/6' 'checkout none (not checked out)' 'repo     acme/app'
+  '2/4 x #7 CI failed' 'url      https://github.com/acme/app/pull/6' 'checkout none (not checked out)' 'repo     acme/app' \
+  'Enter  Open PR' 'y      Copy URL'
+$V capture "$RUN" stack-detail-6-actions | grep -qF 'Show in tree' && echo "FAIL #6 lists Show in tree" || echo "PASS #6 has no Show in tree"
 ```
 
-Expect: the `#7` detail has the `stack` label on its first chain line and one line per member in chain order, `#7` marked `>`, ` · not checked out` on `#6` and `#9` only. On the stack-only `#6` the detail shows the badge-level lines (`next`, `stack` with `#6` marked, `url`), no `checks` or `checked` line, then `checkout none (not checked out)` and `repo     acme/app`.
+Expect: the `#7` detail has the `stack` label on its first chain line and one line per member in chain order, `#7` marked `>`, ` · not checked out` on `#6` and `#9` only. On the stack-only `#6` the detail shows the badge-level lines (`next`, `stack` with `#6` marked, `url`), no `checks` or `checked` line, then `checkout none (not checked out)` and `repo     acme/app`, and the actions `Enter  Open PR`, the CI line, and `y      Copy URL` with no `o      Show in tree` line (a stack-only row has no checkout to show).
 
-**PASS:** both `in_order` calls print PASS.
+**PASS:** both `in_order` calls print PASS, and the last line prints `PASS #6 has no Show in tree`.
 
 ## PT14 Enter and `y` on a stack-only row act on its PR; `o` and `gh` refuse
 

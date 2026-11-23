@@ -2142,6 +2142,60 @@ fn overlay_scenario_set(dir: &std::path::Path, set: &str) {
     assert!(status.success(), "copy scenario set {set}");
 }
 
+/// Run `argv` through the fake `gh` / `glab` script of the same name, on
+/// the scenario files in `dir`. It goes through `env`, so the test process
+/// environment stays untouched.
+#[cfg(unix)]
+fn fake_forge_cli(dir: &std::path::Path, argv: &[String]) -> Answer {
+    let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fake-forge");
+    let mut full = vec![
+        "env".to_string(),
+        format!("WS_FAKE_FORGE_DIR={}", dir.display()),
+        scripts.join(&argv[0]).display().to_string(),
+    ];
+    full.extend_from_slice(&argv[1..]);
+    run_cli(&full, &live())
+}
+
+/// Every single-state verify scenario set that finds a PR also answers the
+/// child list the stack walk asks for that PR's head (`[]`), so the walk
+/// lands no chain instead of a `no scenario` failure.
+#[cfg(unix)]
+#[test]
+fn single_state_scenario_sets_answer_the_child_list_with_no_chain() {
+    const APP: &str = "https://github.com/acme/app.git";
+    const API: &str = "https://gitlab.com/acme/services/api.git";
+    const MERGER: &str = "https://github.com/acme/merger.git";
+    let states = [
+        "behind", "draft", "failed", "merged", "ready", "review", "running",
+    ];
+    let sets = states
+        .iter()
+        .map(|state| (format!("github-{state}"), APP, "feature/auth-refresh"))
+        .chain(
+            states
+                .iter()
+                .map(|state| (format!("gitlab-{state}"), API, "feature/rate-limit")),
+        )
+        .chain([
+            ("context".to_string(), APP, "feature/login-page"),
+            ("context".to_string(), MERGER, "feature/reconciliation"),
+        ]);
+    for (set, remote, branch) in sets {
+        let dir = crate::testutil::unique_dir("ws-scenario-children");
+        std::fs::create_dir_all(&dir).unwrap();
+        overlay_scenario_set(&dir, &set);
+        let run = |argv: &[String]| fake_forge_cli(&dir, argv);
+        let pr = found_pr(lookup(Some(remote), branch, &run));
+        assert_eq!(
+            lookup_stack(Some(remote), &pr, None, &run),
+            Ok(None),
+            "{set} {branch}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn stack_scenario_set_answers_both_chains_through_the_fake_forge() {
@@ -2149,19 +2203,7 @@ fn stack_scenario_set_answers_both_chains_through_the_fake_forge() {
     std::fs::create_dir_all(&dir).unwrap();
     overlay_scenario_set(&dir, "prs-tab");
     overlay_scenario_set(&dir, "stack");
-    let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fake-forge");
-    let live = live();
-    // The fake `gh` / `glab` scripts, through `env` so the test process
-    // environment stays untouched.
-    let run = |argv: &[String]| {
-        let mut full = vec![
-            "env".to_string(),
-            format!("WS_FAKE_FORGE_DIR={}", dir.display()),
-            scripts.join(&argv[0]).display().to_string(),
-        ];
-        full.extend_from_slice(&argv[1..]);
-        run_cli(&full, &live)
-    };
+    let run = |argv: &[String]| fake_forge_cli(&dir, argv);
     const APP: &str = "https://github.com/acme/app.git";
     const API: &str = "https://gitlab.com/acme/services/api.git";
     const MERGER: &str = "https://github.com/acme/merger.git";

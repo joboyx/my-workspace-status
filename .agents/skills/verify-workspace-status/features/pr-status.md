@@ -138,11 +138,11 @@ to_app && $V keys "$RUN" g x
 $V wait "$RUN" 'opened PR #7'
 opened_is https://github.com/acme/app/pull/7 && echo "PASS gx #7" || echo "FAIL gx #7"
 to_api && $V keys "$RUN" g x
-$V wait "$RUN" 'opened PR #5'
+$V wait "$RUN" 'opened PR !5'
 opened_is https://gitlab.com/acme/services/api/-/merge_requests/5 && echo "PASS gx !5" || echo "FAIL gx !5"
 ```
 
-**PASS:** the status line says `opened PR #7` / `opened PR #5`, and both lines print PASS: the last line of `opened.log` is the PR URL of that forge. The status line can show before the recorder writes the file, so `opened_is` polls (5 s at most). No browser starts: the recorder only appends the URL.
+**PASS:** the status line says `opened PR #7` / `opened PR !5`, and both lines print PASS: the last line of `opened.log` is the PR URL of that forge. The status line can show before the recorder writes the file, so `opened_is` polls (5 s at most). No browser starts: the recorder only appends the URL.
 
 ## PS4 `gc` opens the CI page
 

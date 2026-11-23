@@ -1827,7 +1827,7 @@ pub fn pr_badge_repo(row: &VisibleRow) -> Option<&str> {
 /// The ref paints muted and the glyph bold in its state colour
 /// ([`PrMark::role`]); a stale badge paints both muted. A stacked PR
 /// paints its position between the ref and the glyph (`#8 ⧗2/3 ◌`, ASCII
-/// `#8 2/3 P`), muted, and only with the ref. A failed lookup with no
+/// `#8 2/3 d`), muted, and only with the ref. A failed lookup with no
 /// earlier answer paints the failure mark `!` alone, bold in the deleted
 /// colour. Every badge segment carries the badge's [`IconKind`], so hover,
 /// pin, Ctrl+click, and the link cover ref, position, and glyph.
