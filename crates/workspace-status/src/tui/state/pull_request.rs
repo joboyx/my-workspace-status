@@ -985,9 +985,10 @@ impl AppState {
                 self.status = StatusMessage::warn(no_ci_status(&pr_ref));
                 return Effect::None;
             }
-            return Effect::OpenPullRequestCi {
+            return Effect::OpenKnownPullRequest {
                 pr_ref,
                 url: pr.ci_link.url.clone(),
+                page: PrPage::Ci,
             };
         }
         if self.pr_checked_at(&repo).is_some() {
@@ -1620,13 +1621,15 @@ impl AppState {
         }
     }
 
-    /// Land a `gc` open of the CI page of the known PR `pr_ref`: say
-    /// whether the browser started.
-    pub(crate) fn apply_pr_ci_open(&mut self, pr_ref: &str, opened: bool) {
-        self.status = if opened {
-            StatusMessage::ok(ci_opened_status(pr_ref))
-        } else {
-            StatusMessage::error(CI_OPEN_FAILED)
+    /// Land an open of `page` of the known PR `pr_ref`
+    /// ([`Effect::OpenKnownPullRequest`]): say whether the browser
+    /// started, as the `gx` and `gc` opens after a lookup say it.
+    pub(crate) fn apply_pr_known_open(&mut self, pr_ref: &str, page: PrPage, opened: bool) {
+        self.status = match (page, opened) {
+            (PrPage::Pr, true) => StatusMessage::ok(format!("opened PR {pr_ref}")),
+            (PrPage::Pr, false) => StatusMessage::error(OPEN_FAILED),
+            (PrPage::Ci, true) => StatusMessage::ok(ci_opened_status(pr_ref)),
+            (PrPage::Ci, false) => StatusMessage::error(CI_OPEN_FAILED),
         };
     }
 
@@ -1984,6 +1987,16 @@ impl AppState {
         let record = self.pr_cache.checkouts.get(checkout)?;
         let key = (record.remote.clone()?, record.branch.clone());
         self.pr_cache.stacks.get(&key)
+    }
+
+    /// True when a visible checkout's badge shows the PR with URL `url`
+    /// ([`Self::pull_request_for`]); false for a stack member no visible
+    /// checkout has.
+    pub(crate) fn pr_url_checked_out(&self, url: &str) -> bool {
+        self.pr_rows().any(|row| {
+            self.pull_request_for(Path::new(&row.repo))
+                .is_some_and(|pr| pr.url == url)
+        })
     }
 
     /// Default branch of checkout `checkout` for the stack rule

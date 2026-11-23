@@ -16,7 +16,7 @@
 
 use super::*;
 
-use super::super::popover::pr_detail_lines;
+use super::super::popover::{pr_detail_lines, pr_stack_member_lines};
 use super::super::pr_groups::{GroupHeadline, PrGroup, PrRow};
 use super::super::pull_request::{PrReview, ReviewCount};
 use super::super::state::{prs_row_flash_id, PrDetailState, PrsLine, PrsView, PRS_DETAIL_MIN_COLS};
@@ -32,6 +32,12 @@ const PRS_EMPTY: [&str; 3] = [
     "Open and merged PRs of each checkout's branch show here.",
     "Push a branch and open a PR, then press r.",
 ];
+/// Detail `checkout` value of a stack-only row: no visible checkout has
+/// its PR.
+const PRS_NO_CHECKOUT: &str = "none (not checked out)";
+/// End of a stack-only row's stack mark. Shorter than the popover's
+/// `PR_NOT_CHECKED_OUT`, so the stack column keeps its place longer.
+const STACK_ONLY_MARK: &str = " · no checkout";
 /// Repository column width; a longer path is cut with `…`.
 const REPO_COLS: usize = 12;
 /// Blank columns between two row columns.
@@ -80,12 +86,13 @@ fn ci_mark(ascii: bool, row: &PrRow) -> (&'static str, SegRole) {
     (glyph(ascii, unicode, plain), role)
 }
 
-/// Reviews cell of the PR of checkout `checkout` from its detail: GitLab
+/// Reviews cell of the PR of `row` from its checkout's detail: GitLab
 /// `1/2` (given of required), GitHub `1` (approved count), else `—` (`-`
-/// in ASCII). Added colour when the review rule is met.
-fn reviews_cell(state: &AppState, checkout: &std::path::Path) -> (String, SegRole) {
-    let detail = match state.pull_request_detail_for(checkout) {
-        Some(PrDetailState::Ready(detail)) => detail,
+/// in ASCII; always for a stack-only row, which has no detail). Added
+/// colour when the review rule is met.
+fn reviews_cell(state: &AppState, row: &PrRow) -> (String, SegRole) {
+    let detail = match state.pull_request_detail_for(&row.checkout) {
+        Some(PrDetailState::Ready(detail)) if row.checked_out => detail,
         _ => return (glyph(state.ascii, "—", "-").to_string(), SegRole::Muted),
     };
     let role = if detail.review == Some(PrReview::Approved) {
@@ -109,13 +116,29 @@ fn row_state_label(state: PrState) -> &'static str {
     }
 }
 
-/// Stack mark of `row`: `⧗ after #318` (ASCII `after #318`), or empty.
+/// Stack mark of `row`: its stack position and base, `⧗ 2/3 after #318`
+/// (ASCII `2/3 after #318`), the chain root `⧗ 1/3`, or with no walk
+/// landed `⧗ after #318`; a stack-only row ends with
+/// [`STACK_ONLY_MARK`]. Empty for a row in no stack.
 fn stack_text(ascii: bool, row: &PrRow) -> String {
-    match &row.stacked_on {
-        Some(base) if ascii => format!("after {}", base.pr_ref),
-        Some(base) => format!("⧗ after {}", base.pr_ref),
-        None => String::new(),
+    let mut parts: Vec<String> = Vec::new();
+    if !ascii {
+        parts.push("⧗".into());
     }
+    if let Some((position, len)) = row.stack_position {
+        parts.push(format!("{position}/{len}"));
+    }
+    if let Some(base) = &row.stacked_on {
+        parts.push(format!("after {}", base.pr_ref));
+    }
+    if row.stack_position.is_none() && row.stacked_on.is_none() {
+        return String::new();
+    }
+    let mut text = parts.join(" ");
+    if !row.checked_out {
+        text.push_str(STACK_ONLY_MARK);
+    }
+    text
 }
 
 /// The title keeps at least this many columns while optional columns can
@@ -161,7 +184,7 @@ impl RowColumns {
         let mut columns = Self {
             ref_w: widest(&|row| row.pr.ref_text()),
             mark_w: widest(&|row| ci_mark(state.ascii, row).0.to_string()),
-            reviews_w: widest(&|row| reviews_cell(state, &row.checkout).0),
+            reviews_w: widest(&|row| reviews_cell(state, row).0),
             state_w: widest(&|row| row_state_label(row.pr.state).to_string()),
             stack_w,
             reviews: true,
@@ -249,7 +272,19 @@ fn row_segments(
     let ascii = state.ascii;
     let stale = state.pr_is_stale(&row.checkout, state.frame_now);
     let glyph_role = pr_badge_role(row.pr.state, stale);
-    let ref_role = if stale { SegRole::Muted } else { SegRole::Repo };
+    // A stack-only row paints its ref and title muted, so it reads as
+    // apart from the checked-out rows even when the stack column drops.
+    let stack_only = !row.checked_out;
+    let ref_role = if stale || stack_only {
+        SegRole::Muted
+    } else {
+        SegRole::Repo
+    };
+    let title_role = if stack_only {
+        SegRole::Muted
+    } else {
+        SegRole::File
+    };
     let (mark, mark_role) = ci_mark(ascii, row);
     let label = row_state_label(row.pr.state).to_string();
     let gap = || seg(COLUMN_GAP, SegRole::Muted);
@@ -261,7 +296,7 @@ fn row_segments(
         gap(),
         seg(cell(&row.repo, REPO_COLS), SegRole::Muted),
         gap(),
-        seg(cell(&row.title, columns.title_w(width)), SegRole::File),
+        seg(cell(&row.title, columns.title_w(width)), title_role),
         gap(),
     ];
     if columns.ci_label {
@@ -269,7 +304,7 @@ fn row_segments(
     }
     segs.push(seg(cell(mark, columns.mark_w), mark_role));
     if columns.reviews {
-        let (reviews, reviews_role) = reviews_cell(state, &row.checkout);
+        let (reviews, reviews_role) = reviews_cell(state, row);
         segs.push(gap());
         segs.push(seg(cell(&reviews, columns.reviews_w), reviews_role));
     }
@@ -482,7 +517,21 @@ fn draw_prs_list(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, view: 
                 let hit_w = u16::try_from(hit_w)
                     .unwrap_or(0)
                     .min(rows_area.right().saturating_sub(x));
-                if hit_w > 0 {
+                if !row.checked_out {
+                    // A stack-only row has no checkout, so no PR icon (its
+                    // popover and Ctrl+click read a checkout); its ref
+                    // still links to its PR.
+                    let ref_x = x.saturating_add(2);
+                    let ref_w = hit_w.saturating_sub(2);
+                    if ref_w > 0 {
+                        state.layout.links.push(LinkHit {
+                            y,
+                            x: ref_x,
+                            width: ref_w,
+                            url: row.pr.url.clone(),
+                        });
+                    }
+                } else if hit_w > 0 {
                     state.layout.icon_hits.push(IconHit {
                         y,
                         x,
@@ -556,7 +605,21 @@ fn draw_prs_detail(
     let ascii = state.ascii;
     let muted = Style::default().fg(palette.muted);
     let role = |role: SegRole| Style::default().fg(seg_role_color(role, palette));
-    let mut fields = pr_detail_lines(state, &row.checkout, unix_now());
+    let mut fields = if row.checked_out {
+        pr_detail_lines(state, &row.checkout, unix_now())
+    } else {
+        pr_stack_member_lines(state, &row.checkout, &row.pr, unix_now())
+    };
+    if !row.checked_out {
+        fields.push(PopoverLine::Field {
+            label: "checkout",
+            value: PRS_NO_CHECKOUT.into(),
+            role: SegRole::Muted,
+            link: None,
+            bold: 0,
+            mark: None,
+        });
+    }
     for (nth, checkout) in view.checkouts_of(row).iter().enumerate() {
         let path = checkout.to_string_lossy().into_owned();
         let kind = state
@@ -573,7 +636,7 @@ fn draw_prs_detail(
             label: if nth == 0 { "checkout" } else { "" },
             value: format!("{path} · {kind}"),
             role: SegRole::Dir,
-            link: false,
+            link: None,
             bold: 0,
             mark: None,
         });
@@ -582,7 +645,7 @@ fn draw_prs_detail(
         label: "repo",
         value: row.repo.clone(),
         role: SegRole::Repo,
-        link: false,
+        link: None,
         bold: 0,
         mark: None,
     });
@@ -606,8 +669,9 @@ fn draw_prs_detail(
     let start = state.keep_prs_detail_scroll(&row.pr.url, line_count.saturating_sub(height));
     let width = usize::from(body.width);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    // Line index, column, painted width, and full URL of the `url` field.
-    let mut link: Option<(usize, usize, usize, String)> = None;
+    // Line index, column, painted width, and full URL of each link field
+    // (the `stack` chain lines and `url`).
+    let mut links: Vec<(usize, usize, usize, String)> = Vec::new();
     // `<glyph> <ref> <title>`.
     let mut title = vec![
         Span::styled(
@@ -644,7 +708,7 @@ fn draw_prs_detail(
                 label,
                 value,
                 role: value_role,
-                link: is_link,
+                link,
                 bold,
                 mark,
             } => {
@@ -655,9 +719,9 @@ fn draw_prs_detail(
                 }
                 let x = help_spans_width(&spans);
                 let shown = fit_with_ellipsis(value, width.saturating_sub(x));
-                // A cut URL keeps the full one in its link.
-                if *is_link && !shown.is_empty() {
-                    link = Some((lines.len(), x, visible_width(&shown), value.clone()));
+                // A cut value keeps the full URL in its link.
+                if let Some(url) = link.as_ref().filter(|_| !shown.is_empty()) {
+                    links.push((lines.len(), x, visible_width(&shown), url.clone()));
                 }
                 let mut head = (*bold).min(shown.len());
                 while !shown.is_char_boundary(head) {
@@ -700,8 +764,11 @@ fn draw_prs_detail(
         )));
     }
     debug_assert_eq!(lines.len(), line_count, "the bar measures every line");
-    // The `url` line links only while it is in the viewport.
-    if let Some((y, x, shown_w, url)) = link.filter(|(y, ..)| (start..start + height).contains(y)) {
+    // A link line links only while it is in the viewport.
+    for (y, x, shown_w, url) in links
+        .into_iter()
+        .filter(|(y, ..)| (start..start + height).contains(y))
+    {
         if let (Ok(y), Ok(x), Ok(shown_w)) = (
             u16::try_from(y - start),
             u16::try_from(x),
@@ -733,7 +800,7 @@ mod tests {
     use super::super::super::action::{Action, Effect};
     use super::super::super::pull_request::{PrLookup, PrPage};
     use super::super::super::state::prs_fixtures::{
-        app_over, checkout, land, pr, workspace, GH_APP, GL_API,
+        app_over, checkout, land, pr, stack_workspace, workspace, GH_APP, GL_API,
     };
     use super::*;
 
@@ -1559,6 +1626,231 @@ mod tests {
                     assert!(!failed.contains("CI ✕"), "{what}: {failed}");
                     assert!(failed.contains("  ✕  CI failed"), "{what}: {failed}");
                 }
+            }
+        }
+    }
+
+    /// The stack workspace on its PRs tab, cursor on the line of `pr_ref`.
+    fn on_stack_tab(ascii: bool, background: BackgroundMode, pr_ref: &str) -> AppState {
+        let mut state = stack_workspace(ascii);
+        state.background = background;
+        state.dispatch(Action::OpenPrsTab);
+        let view = state.prs_view().unwrap();
+        let index = view
+            .lines
+            .iter()
+            .position(|line| {
+                view.line_row(*line).pr.ref_text() == pr_ref && matches!(line, PrsLine::Row { .. })
+            })
+            .expect("a row");
+        state.dispatch(Action::MoveToStart);
+        state.dispatch(Action::Move(index as i32));
+        state
+    }
+
+    #[test]
+    fn stack_rows_paint_their_position_and_the_no_checkout_mark_in_both_looks() {
+        // Ref, then the stack column the row ends with.
+        let rows = [
+            ("#6", "⧗ 1/4 · no checkout"),
+            ("#7", "⧗ 2/4 after #6"),
+            ("#8", "⧗ 3/4 after #7"),
+            ("#9", "⧗ 4/4 after #8 · no checkout"),
+            ("!4", "⧗ 1/3 · no checkout"),
+            ("!5", "⧗ 2/3 after !4"),
+            ("!6", "⧗ 3/3 after !5 · no checkout"),
+        ];
+        for background in LOOKS {
+            let what = format!("{background:?}");
+            let mut state = on_stack_tab(false, background, "#6");
+            let (_, text) = paint(&mut state, 180, 30);
+            assert_eq!(text[0].trim_end(), " Workspace │ PRs 7 [✗]", "{what}");
+            let list = crop(&text, state.layout.prs_list);
+            let mut at = Vec::new();
+            for (pr_ref, stack) in rows {
+                let (y, line) = line_with(&list, &format!(" {pr_ref} "));
+                assert!(
+                    line.trim_end()
+                        .trim_end_matches('│')
+                        .trim_end()
+                        .ends_with(stack),
+                    "{what}: {stack:?} in {line:?}"
+                );
+                at.push(y);
+            }
+            assert!(
+                at.windows(2).all(|pair| pair[0] < pair[1]),
+                "{what}: chain order"
+            );
+
+            // A stack-only row paints no PR icon (no checkout to describe)
+            // but its ref still links to its PR; a checked-out row keeps
+            // its icon.
+            for (pr_ref, y, checked_out) in [("#6", at[0], false), ("#7", at[1], true)] {
+                let icon = state
+                    .layout
+                    .icon_hits
+                    .iter()
+                    .any(|hit| hit.y == y && matches!(hit.target, IconTarget::PullRequest(_)));
+                assert_eq!(icon, checked_out, "{what}: {pr_ref} icon");
+            }
+            let url = "https://github.com/acme/app/pull/6";
+            let link = state
+                .layout
+                .links
+                .iter()
+                .find(|link| link.y == at[0] && link.url == url)
+                .unwrap_or_else(|| panic!("{what}: no link on the #6 row"));
+            assert_eq!(link.x, col_of(&text, at[0], "#6"), "{what}: over the ref");
+            assert_eq!(link.width, 2, "{what}");
+        }
+    }
+
+    #[test]
+    fn a_stack_only_row_shows_its_badge_lines_the_chain_and_no_checkout() {
+        for background in LOOKS {
+            let what = format!("{background:?}");
+            let mut state = on_stack_tab(false, background, "#6");
+            let (terminal, text) = paint(&mut state, 180, 30);
+            let detail = crop(&text, state.layout.prs_detail);
+            let (_, title) = line_with(&detail, "○ #6");
+            assert!(title.contains("○ #6 Store the tokens"), "{what}: {title}");
+            for line in [
+                "next     ▸ get review",
+                "stack    ▸ 1/4 ○ #6 in review · not checked out",
+                "           2/4 ◉ #7 ready to merge",
+                "           3/4 ✕ #8 CI failed",
+                "           4/4 ◌ #9 draft · not checked out",
+                "checkout none (not checked out)",
+                "repo     acme/app",
+                "url      https://github.com/acme/app/pull/6",
+            ] {
+                line_with(&detail, line);
+            }
+            assert!(
+                !detail
+                    .iter()
+                    .any(|line| line.contains("checked ") && !line.contains("not checked")),
+                "{what}: no `checked` line for a stack-only PR"
+            );
+            // This PR's line is bold; each chain line links to its PR.
+            let buf = terminal.backend().buffer();
+            let (y, _) = line_with(&text, "▸ 1/4 ○ #6");
+            let x = col_of(&text, y, "1/4 ○ #6");
+            assert!(buf[(x, y)].modifier.contains(Modifier::BOLD), "{what}");
+            let (y7, _) = line_with(&text, "2/4 ◉ #7");
+            let x7 = col_of(&text, y7, "2/4 ◉ #7");
+            assert!(!buf[(x7, y7)].modifier.contains(Modifier::BOLD), "{what}");
+            for (needle, url) in [
+                ("1/4 ○ #6", "https://github.com/acme/app/pull/6"),
+                ("2/4 ◉ #7", "https://github.com/acme/app/pull/7"),
+                ("4/4 ◌ #9", "https://github.com/acme/app/pull/9"),
+            ] {
+                let (y, _) = line_with(&text, needle);
+                assert!(
+                    state.layout.links.iter().any(|link| link.y == y
+                        && link.url == url
+                        && link.x == col_of(&text, y, needle)),
+                    "{what}: {needle} links to {url}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_checked_out_row_shows_the_chain_with_its_own_line_marked() {
+        for background in LOOKS {
+            let what = format!("{background:?}");
+            let mut state = on_stack_tab(false, background, "!5");
+            let (_, text) = paint(&mut state, 180, 30);
+            let detail = crop(&text, state.layout.prs_detail);
+            for line in [
+                "stack      1/3 ○ !4 in review · not checked out",
+                "         ▸ 2/3 ◐ !5 CI running",
+                "           3/3 ◌ !6 draft · not checked out",
+                "checkout api · primary",
+            ] {
+                assert!(
+                    detail.iter().any(|row| row.contains(line)),
+                    "{what}: {line:?} in\n{}",
+                    detail.join("\n")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ascii_stack_rows_and_chain_lines_paint_letters() {
+        let mut state = on_stack_tab(true, BackgroundMode::Terminal, "#7");
+        let (_, text) = paint(&mut state, 180, 30);
+        let list = crop(&text, state.layout.prs_list);
+        let (_, six) = line_with(&list, " #6 ");
+        assert!(six.contains("  1/4 · no checkout"), "{six}");
+        let (_, seven) = line_with(&list, " #7 ");
+        assert!(seven.contains("  2/4 after #6"), "{seven}");
+        assert!(!text.iter().any(|line| line.contains('⧗')));
+        let detail = crop(&text, state.layout.prs_detail);
+        line_with(&detail, "  1/4 P #6 in review · not checked out");
+        line_with(&detail, "> 2/4 A #7 ready to merge");
+    }
+
+    #[test]
+    fn a_narrow_list_drops_the_stack_column_before_the_title() {
+        for background in LOOKS {
+            let what = format!("{background:?}");
+            let mut state = on_stack_tab(false, background, "#7");
+            let (_, text) = paint(&mut state, 132, 30);
+            let list = crop(&text, state.layout.prs_list);
+            let (_, six) = line_with(&list, " #6 ");
+            assert!(
+                six.contains("Store the tokens"),
+                "{what}: the title stays: {six}"
+            );
+            assert!(
+                !list
+                    .iter()
+                    .any(|line| line.contains("⧗") || line.contains("no checkout")),
+                "{what}: the stack column gave way:\n{}",
+                list.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn a_stack_only_row_paints_its_ref_and_title_muted_in_both_looks() {
+        // At a width where the stack column dropped, a stack-only row
+        // still reads apart: its ref and title are muted, its glyph keeps
+        // its state colour. The cursor sits on `!5`, off both rows.
+        for background in LOOKS {
+            let what = format!("{background:?}");
+            let mut state = on_stack_tab(false, background, "!5");
+            let (terminal, text) = paint(&mut state, 132, 30);
+            let list = crop(&text, state.layout.prs_list);
+            assert!(
+                !list.iter().any(|line| line.contains("⧗")),
+                "{what}: the stack column dropped:\n{}",
+                list.join("\n")
+            );
+            let buf = terminal.backend().buffer();
+            let palette = state.theme.palette();
+            for (head, title, stack_only) in [
+                ("○ #6", "Store the tokens", true),
+                ("◉ #7", "Refresh the auth token", false),
+            ] {
+                let (y, _) = line_with(&text, head);
+                let x = col_of(&text, y, head);
+                assert_ne!(buf[(x, y)].fg, palette.muted, "{what}: {head} glyph");
+                assert_eq!(
+                    buf[(x + 2, y)].fg == palette.muted,
+                    stack_only,
+                    "{what}: {head} ref"
+                );
+                let title_x = col_of(&text, y, title);
+                assert_eq!(
+                    buf[(title_x, y)].fg == palette.muted,
+                    stack_only,
+                    "{what}: {head} title"
+                );
             }
         }
     }

@@ -326,10 +326,12 @@ pub(crate) enum JobOutcome {
         /// The quit flag stopped the fill before its last key.
         cancelled: bool,
     },
-    /// `gc` browser open of the CI page of the known PR `pr_ref`. `opened`
-    /// is true when the browser started.
-    PullRequestCiOpen {
+    /// Browser open of `page` of the known PR `pr_ref`
+    /// ([`Effect::OpenKnownPullRequest`]). `opened` is true when the
+    /// browser started.
+    PullRequestKnownOpen {
         pr_ref: String,
+        page: PrPage,
         opened: bool,
     },
     /// "View remotely" check, then the browser open. `page` is the page URL,
@@ -1086,10 +1088,10 @@ pub(crate) struct Interpreter {
     /// Queued `gx` opens, and `gc` opens that look the PR up first:
     /// checkout, branch, page. Each has its own slot.
     pr_opens: VecDeque<(PathBuf, String, PrPage)>,
-    /// Queued `gc` opens of a known PR: its ref and CI URL. Each has its
-    /// own [`UserTag::PullRequest`] slot and runs after the queued `gx`
-    /// opens.
-    pr_ci_opens: VecDeque<(String, String)>,
+    /// Queued opens of a known PR (`gc`, and a stack-only PRs tab row):
+    /// its ref, the URL, and which page it is. Each has its own
+    /// [`UserTag::PullRequest`] slot and runs after the queued `gx` opens.
+    pr_known_opens: VecDeque<(String, String, PrPage)>,
     /// Queued "View remotely" opens: checkout, target. Each has its own
     /// [`UserTag::PullRequest`] slot and runs after the queued `gx` and
     /// `gc` opens.
@@ -1200,7 +1202,7 @@ impl Interpreter {
             clipboard_tool: DEFAULT_CLIPBOARD_TOOL,
             blame_previous: None,
             pr_opens: VecDeque::new(),
-            pr_ci_opens: VecDeque::new(),
+            pr_known_opens: VecDeque::new(),
             remote_views: VecDeque::new(),
             checkout_remotes: VecDeque::new(),
             pr_badges: VecDeque::new(),
@@ -1974,8 +1976,8 @@ impl Interpreter {
                 self.pr_opens.push_back((repo, branch, page));
                 self.sched.enqueue_user(UserTag::PullRequest);
             }
-            Effect::OpenPullRequestCi { pr_ref, url } => {
-                self.pr_ci_opens.push_back((pr_ref, url));
+            Effect::OpenKnownPullRequest { pr_ref, url, page } => {
+                self.pr_known_opens.push_back((pr_ref, url, page));
                 self.sched.enqueue_user(UserTag::PullRequest);
             }
             Effect::ViewRemotely { checkout, target } => {
@@ -2839,8 +2841,12 @@ impl Interpreter {
                 self.mark();
                 self.alert_pr_changes(state);
             }
-            JobOutcome::PullRequestCiOpen { pr_ref, opened } => {
-                state.apply_pr_ci_open(&pr_ref, opened);
+            JobOutcome::PullRequestKnownOpen {
+                pr_ref,
+                page,
+                opened,
+            } => {
+                state.apply_pr_known_open(&pr_ref, page, opened);
                 self.mark();
             }
             JobOutcome::RemoteView { page, opened } => {
@@ -3237,7 +3243,7 @@ impl Interpreter {
         let free = PR_BADGE_LOOKUPS_MAX.saturating_sub(self.pr_badges_running);
         let waiting = self.pr_badges.len() + self.pr_details.len();
         let wanted = self.pr_opens.len()
-            + self.pr_ci_opens.len()
+            + self.pr_known_opens.len()
             + self.remote_views.len()
             + self.checkout_remotes.len()
             + waiting.min(free);
@@ -4404,13 +4410,18 @@ impl Interpreter {
                     );
                     return;
                 }
-                if let Some((pr_ref, url)) = self.pr_ci_opens.pop_front() {
+                if let Some((pr_ref, url, page)) = self.pr_known_opens.pop_front() {
                     let open = self.pr_opener;
+                    let what = match page {
+                        PrPage::Pr => "known PR open",
+                        PrPage::Ci => "PR CI open",
+                    };
                     spawn(
                         id,
-                        JobRelease::Read { what: "PR CI open" },
-                        Box::new(move || JobOutcome::PullRequestCiOpen {
+                        JobRelease::Read { what },
+                        Box::new(move || JobOutcome::PullRequestKnownOpen {
                             pr_ref,
+                            page,
                             opened: open(&url, &cancel).is_ok(),
                         }),
                     );

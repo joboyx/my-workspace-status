@@ -8189,8 +8189,8 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                         let room = inner_width.saturating_sub(x);
                         if room > 0 {
                             let shown = fit_with_ellipsis(value, room);
-                            if *link {
-                                line_links[index] = Some((x, visible_width(&shown), value.clone()));
+                            if let Some(url) = link {
+                                line_links[index] = Some((x, visible_width(&shown), url.clone()));
                             }
                             let mut head = (*bold).min(shown.len());
                             while !shown.is_char_boundary(head) {

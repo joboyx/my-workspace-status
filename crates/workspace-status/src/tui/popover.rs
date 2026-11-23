@@ -46,7 +46,7 @@ use super::icons::{
 };
 use super::line_blame::relative_age;
 use super::pr_status::{CheckBucket, ChecksSummary, PrState};
-use super::pull_request::{PrReview, PullRequestDetail, ReviewCount};
+use super::pull_request::{PrReview, PrStack, PullRequest, PullRequestDetail, ReviewCount};
 use super::state::{AppState, PrDetailState};
 use super::tree::{
     file_change_from_name_status, find_node, is_merge_mark_kind, path_under_dir, pr_badge_kind,
@@ -195,9 +195,11 @@ pub enum PopoverLine {
         /// in (a branch name, a sync count, a status side), else
         /// [`SegRole::File`].
         role: SegRole,
-        /// True when the value is a URL the painted value text links to
-        /// (OSC 8). The link keeps the full value when the text is cut.
-        link: bool,
+        /// The URL the painted value text links to (OSC 8): the value
+        /// itself for a `url` field, the member's PR for a `stack` chain
+        /// line. The link keeps the full URL when the text is cut, and
+        /// `y` copies the URL.
+        link: Option<String>,
         /// Length in bytes of the head of the value that paints bold: 0
         /// for none, the value's length for all of it.
         bold: usize,
@@ -263,10 +265,14 @@ impl PopoverLine {
         !matches!(self, Self::Text(_) | Self::Note(_) | Self::Rule)
     }
 
-    /// Text `y` copies: the value of a field, the title of an action.
+    /// Text `y` copies: the link of a link field, the value of another
+    /// field, the title of an action.
     pub fn copy_text(&self) -> String {
         match self {
             Self::Text(text) | Self::Note(text) => text.clone(),
+            Self::Field {
+                link: Some(url), ..
+            } => url.clone(),
             Self::Field { value, .. } => value.clone(),
             Self::Rule => String::new(),
             Self::Action { title, .. } => title.to_string(),
@@ -977,7 +983,7 @@ fn role_field(label: &'static str, value: impl Into<String>, role: SegRole) -> P
         label,
         value: value.into(),
         role,
-        link: false,
+        link: None,
         bold: 0,
         mark: None,
     }
@@ -985,11 +991,12 @@ fn role_field(label: &'static str, value: impl Into<String>, role: SegRole) -> P
 
 /// A field whose value is a URL: the painted value links to it.
 fn link_field(label: &'static str, url: impl Into<String>) -> PopoverLine {
+    let url = url.into();
     PopoverLine::Field {
         label,
-        value: url.into(),
+        value: url.clone(),
         role: SegRole::File,
-        link: true,
+        link: Some(url),
         bold: 0,
         mark: None,
     }
@@ -1006,7 +1013,7 @@ fn bold_field(
         label,
         value: value.into(),
         role,
-        link: false,
+        link: None,
         bold,
         mark: None,
     }
@@ -1354,7 +1361,8 @@ pub const PR_COPY_URL_TITLE: &str = "Copy URL";
 /// | `▸ <next action>`, or `merged <age>` | `next` | badge |
 /// | author | `author` | detail |
 /// | `head → base` | `branch` | detail |
-/// | `after <base ref> (<base state>)` | `stack` | known PRs |
+/// | one line per chain member, `<pos>/<len> <glyph> <ref> <state>` (this PR marked; see [`pr_stack_fields`]) | `stack`, then blank | stack walk |
+/// | `after <base ref> (<base state>)`, while no walk landed | `stack` | known PRs |
 /// | checks summary, or GitLab `pipeline <status>` | `checks` | detail |
 /// | failed, then running, check names (`+N more`) | (blank) | detail |
 /// | review count | `reviews` / `approvals` | detail |
@@ -1444,14 +1452,52 @@ pub(crate) fn pr_detail_lines(state: &AppState, repo: &Path, now_unix: i64) -> V
     let Some(pr) = state.pull_request_for(repo) else {
         return Vec::new();
     };
+    pr_lines(
+        state,
+        pr,
+        Some(repo),
+        state.pr_stack(repo),
+        state.pr_stack_base(repo),
+        now_unix,
+    )
+}
+
+/// The lines of stack member `pr`, which no visible checkout has, as the
+/// PRs tab detail pane shows them: the badge-level lines of
+/// [`pr_detail_lines`] (`next`, the `stack` chain of checkout `listing`,
+/// whose stack lists it, `notes`, `url`), with no detail and no `checked`
+/// line. Its stack base is read from that chain.
+pub(crate) fn pr_stack_member_lines(
+    state: &AppState,
+    listing: &Path,
+    pr: &PullRequest,
+    now_unix: i64,
+) -> Vec<PopoverLine> {
+    let stack = state.pr_stack(listing);
+    let base = stack
+        .and_then(|stack| pr.stacked_on(&stack.members, state.pr_stack_default_branch(listing)));
+    pr_lines(state, pr, None, stack, base, now_unix)
+}
+
+/// The lines under the `number` line of `pr`: [`pr_detail_lines`] for the
+/// PR of `checkout`, or with no checkout [`pr_stack_member_lines`] (no
+/// detail note or fields, no `checked`). `stack` is the chain the `stack`
+/// lines show, `stack_base` the PR `next` and the one-line fallback read.
+fn pr_lines(
+    state: &AppState,
+    pr: &PullRequest,
+    checkout: Option<&Path>,
+    stack: Option<&PrStack>,
+    stack_base: Option<&PullRequest>,
+    now_unix: i64,
+) -> Vec<PopoverLine> {
     let ascii = state.ascii;
     let (_, role) = pr_badge_mark(ascii, pr.state);
-    let detail_state = state.pull_request_detail_for(repo);
+    let detail_state = checkout.and_then(|repo| state.pull_request_detail_for(repo));
     let detail = match detail_state {
         Some(PrDetailState::Ready(detail)) => Some(detail),
         _ => None,
     };
-    let stack_base = state.pr_stack_base(repo);
     let mut lines = Vec::new();
     match detail_state {
         Some(PrDetailState::Loading(_)) => lines.push(PopoverLine::Note(PR_DETAIL_LOADING.into())),
@@ -1483,12 +1529,15 @@ pub(crate) fn pr_detail_lines(state: &AppState, repo: &Path, now_unix: i64) -> V
             ));
         }
     }
-    if let Some(base) = stack_base {
-        lines.push(role_field(
+    match (stack, stack_base) {
+        (Some(stack), _) => pr_stack_fields(state, stack, &pr.url, &mut lines),
+        // No walk landed yet, but a visible checkout has the base.
+        (None, Some(base)) => lines.push(role_field(
             "stack",
             format!("after {} ({})", base.ref_text(), base.state.label()),
             SegRole::Modified,
-        ));
+        )),
+        (None, None) => {}
     }
     if let Some(detail) = detail {
         pr_check_fields(ascii, detail, &mut lines);
@@ -1510,9 +1559,57 @@ pub(crate) fn pr_detail_lines(state: &AppState, repo: &Path, now_unix: i64) -> V
             },
         ));
     }
-    lines.extend(pr_checked_field(state, repo, now_unix));
+    if let Some(repo) = checkout {
+        lines.extend(pr_checked_field(state, repo, now_unix));
+    }
     lines.push(link_field("url", pr.url.clone()));
     lines
+}
+
+/// Suffix of a `stack` chain line whose PR no visible checkout has.
+pub const PR_NOT_CHECKED_OUT: &str = " · not checked out";
+
+/// `stack`: one line per member of `stack`, in chain order,
+/// `<pos>/<len> <glyph> <ref> <state label>` in the member's badge colour,
+/// with [`PR_NOT_CHECKED_OUT`] for a member no visible checkout has. The
+/// first line carries the label; the line of the PR at `this_url` is
+/// marked `▸` (ASCII `>`) and bold. Each line links to its member's PR, so
+/// it opens like the `url` line and `y` copies that URL.
+fn pr_stack_fields(
+    state: &AppState,
+    stack: &PrStack,
+    this_url: &str,
+    lines: &mut Vec<PopoverLine>,
+) {
+    let ascii = state.ascii;
+    let len = stack.members.len();
+    for (at, member) in stack.members.iter().enumerate() {
+        let (glyph, role) = pr_badge_mark(ascii, member.state);
+        let mut value = format!(
+            "{}/{len} {glyph} {} {}",
+            at + 1,
+            member.ref_text(),
+            member.state.label()
+        );
+        if !state.pr_url_checked_out(&member.url) {
+            value.push_str(PR_NOT_CHECKED_OUT);
+        }
+        let this = member.url == this_url;
+        // Every line keeps the mark column, so the positions line up.
+        let mark = if this {
+            (if ascii { ">" } else { "▸" }, SegRole::Repo)
+        } else {
+            (" ", SegRole::Muted)
+        };
+        lines.push(PopoverLine::Field {
+            label: if at == 0 { "stack" } else { "" },
+            bold: if this { value.len() } else { 0 },
+            value,
+            role,
+            link: Some(member.url.clone()),
+            mark: Some(mark),
+        });
+    }
 }
 
 /// `state`: the forge state words, `DRAFT`, and the review decision, in
@@ -1574,7 +1671,7 @@ fn pr_check_fields(ascii: bool, detail: &PullRequestDetail, lines: &mut Vec<Popo
             label: "",
             value: check.name.clone(),
             role: SegRole::File,
-            link: false,
+            link: None,
             bold: 0,
             mark: Some(mark),
         });

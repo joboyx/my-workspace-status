@@ -2513,9 +2513,10 @@ fn gc(app: &mut AppState) -> Effect {
 }
 
 fn ci_open(pr_ref: &str, url: &str) -> Effect {
-    Effect::OpenPullRequestCi {
+    Effect::OpenKnownPullRequest {
         pr_ref: pr_ref.into(),
         url: url.into(),
+        page: PrPage::Ci,
     }
 }
 
@@ -2726,12 +2727,33 @@ fn pr_popover_lines_act_on_their_own_pr_not_the_focused_graph_row() {
 fn a_ci_open_reports_each_outcome_on_the_status_line() {
     let mut app = app_with(&[repo("app", "feature")], &[]);
     let _ = app.due_pr_lookups();
-    for (pr_ref, opened, text, kind) in [
-        ("#318", true, "opened CI for #318", StatusKind::Ok),
-        ("!12", true, "opened CI for !12", StatusKind::Ok),
-        ("#318", false, "could not open CI", StatusKind::Error),
+    for (pr_ref, page, opened, text, kind) in [
+        (
+            "#318",
+            PrPage::Ci,
+            true,
+            "opened CI for #318",
+            StatusKind::Ok,
+        ),
+        ("!12", PrPage::Ci, true, "opened CI for !12", StatusKind::Ok),
+        (
+            "#318",
+            PrPage::Ci,
+            false,
+            "could not open CI",
+            StatusKind::Error,
+        ),
+        ("#6", PrPage::Pr, true, "opened PR #6", StatusKind::Ok),
+        ("!4", PrPage::Pr, true, "opened PR !4", StatusKind::Ok),
+        (
+            "#6",
+            PrPage::Pr,
+            false,
+            "could not open PR",
+            StatusKind::Error,
+        ),
     ] {
-        app.apply_pr_ci_open(pr_ref, opened);
+        app.apply_pr_known_open(pr_ref, page, opened);
         assert_eq!(app.status, text);
         assert_eq!(app.status.kind(), kind, "{text}");
     }

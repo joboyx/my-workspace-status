@@ -4,8 +4,9 @@
 //!
 //! Everything here is pure except [`run_title_command`], which runs the
 //! operator's program and blocks. The caller builds one [`PrEntry`] per
-//! listed checkout and gets back the ordered [`PrGroup`]s; it never decides
-//! a group, an order, or a header text itself.
+//! listed checkout, adds the stack members no checkout has
+//! ([`with_stack_members`]), and gets back the ordered [`PrGroup`]s; it
+//! never decides a group, an order, or a header text itself.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -17,7 +18,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::pr_status::{NextAction, PrState, LONG_LIVED_BRANCHES};
-use super::pull_request::{wait_until, PullRequest};
+use super::pull_request::{wait_until, PrStack, PullRequest};
 
 /// Header of the group that holds every PR without a key and without a
 /// shared branch. It is always the last group.
@@ -46,19 +47,100 @@ const TITLE_COMMAND_TIME_LIMIT: Duration = Duration::from_secs(2);
 /// Most bytes read from the first line of a title command.
 const TITLE_LINE_MAX: u64 = 4096;
 
-/// One listed checkout and the PR of its branch: the input of
-/// [`group_prs`].
+/// One listed PR: the input of [`group_prs`]. Either the PR of a listed
+/// checkout's branch, or a member of a checkout's stack that no visible
+/// checkout has ([`with_stack_members`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrEntry {
-    /// Path of the checkout the PR belongs to.
+    /// Path of the checkout the PR belongs to. For a stack-only PR
+    /// ([`Self::checked_out`] false), the first checkout whose stack lists
+    /// it.
     pub checkout: PathBuf,
     /// Repository name shown in the row, for example `acme/app`.
     pub repo: String,
-    /// The PR of the checkout's current branch.
+    /// The PR of the checkout's current branch, or the stack member.
     pub pr: PullRequest,
-    /// The default branch configured for the checkout, if any. A PR whose
-    /// base is this branch is never stacked on another PR.
+    /// The default branch of the checkout for the stack rule, if known. A
+    /// PR whose base is this branch is never stacked on another PR.
     pub default_branch: Option<String>,
+    /// False for a stack member that no visible checkout has.
+    pub checked_out: bool,
+    /// Place of the PR in its stack and the member count (`(2, 3)`), when
+    /// a stack walk lists it.
+    pub stack_position: Option<(usize, usize)>,
+}
+
+/// The stack of one visible checkout, for [`with_stack_members`].
+#[derive(Clone, Copy, Debug)]
+pub struct StackSource<'a> {
+    /// The checkout whose PR the stack is around.
+    pub checkout: &'a Path,
+    /// Repository name of the checkout (`acme/app`).
+    pub repo: &'a str,
+    /// Default branch of the checkout for the stack rule.
+    pub default_branch: Option<&'a str>,
+    /// The checkout's stack.
+    pub stack: &'a PrStack,
+}
+
+/// `entries` (one per PR a visible checkout shows) with the stack members
+/// of `sources` that no entry has added after them, one entry per distinct
+/// PR URL, and the checkouts whose stack lists each added PR, by URL, in
+/// `sources` order.
+///
+/// An added member takes the checkout, repository, and default branch of
+/// the first source that lists it, and [`PrEntry::checked_out`] false.
+/// Every entry a stack lists gets its [`PrEntry::stack_position`]: from
+/// its own checkout's stack first, else from the first source that lists
+/// it.
+pub fn with_stack_members(
+    mut entries: Vec<PrEntry>,
+    sources: &[StackSource<'_>],
+) -> (Vec<PrEntry>, HashMap<String, Vec<PathBuf>>) {
+    let position = |url: &str, own: Option<&Path>| {
+        let in_stack = |source: &StackSource<'_>| {
+            let at = source
+                .stack
+                .members
+                .iter()
+                .position(|member| member.url == url)?;
+            Some((at + 1, source.stack.members.len()))
+        };
+        sources
+            .iter()
+            .filter(|source| Some(source.checkout) == own)
+            .chain(sources)
+            .find_map(in_stack)
+    };
+    for entry in &mut entries {
+        entry.stack_position = position(&entry.pr.url, Some(&entry.checkout));
+    }
+    let mut listed_by: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for source in sources {
+        for member in &source.stack.members {
+            match entries.iter().find(|entry| entry.pr.url == member.url) {
+                Some(entry) if entry.checked_out => {}
+                Some(_) => {
+                    let listed = listed_by.entry(member.url.clone()).or_default();
+                    if !listed.iter().any(|path| path == source.checkout) {
+                        listed.push(source.checkout.to_path_buf());
+                    }
+                }
+                None => {
+                    listed_by.insert(member.url.clone(), vec![source.checkout.to_path_buf()]);
+                    entries.push(PrEntry {
+                        checkout: source.checkout.to_path_buf(),
+                        repo: source.repo.to_string(),
+                        pr: member.clone(),
+                        default_branch: source.default_branch.map(str::to_string),
+                        checked_out: false,
+                        stack_position: position(&member.url, None),
+                    });
+                }
+            }
+        }
+    }
+    (entries, listed_by)
 }
 
 /// How a group got its key.
@@ -102,6 +184,12 @@ pub struct PrRow {
     /// What the author does next, with the stack taken into account; `None`
     /// when merged.
     pub next_action: Option<NextAction>,
+    /// False for a stack member that no visible checkout has
+    /// ([`PrEntry::checked_out`]).
+    pub checked_out: bool,
+    /// Place of the PR in its stack and the member count
+    /// ([`PrEntry::stack_position`]).
+    pub stack_position: Option<(usize, usize)>,
 }
 
 /// The next action of a group, with the PR it targets.
@@ -213,6 +301,8 @@ pub fn group_prs(entries: Vec<PrEntry>) -> Vec<PrGroup> {
             title,
             stacked_on,
             next_action,
+            checked_out: entry.checked_out,
+            stack_position: entry.stack_position,
         });
     }
     let mut groups: Vec<PrGroup> = groups

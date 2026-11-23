@@ -6140,9 +6140,10 @@ fn gc_looks_the_pr_up_then_opens_its_ci_page_on_both_forges() {
         let (effect, status) = run_gc(&mut state, cli_must_not_run, opener_ok);
         assert_eq!(
             effect,
-            Effect::OpenPullRequestCi {
+            Effect::OpenKnownPullRequest {
                 pr_ref: pr_ref.into(),
                 url: url.into(),
+                page: PrPage::Ci,
             }
         );
         assert_eq!(status, format!("opened CI for {pr_ref}"));
