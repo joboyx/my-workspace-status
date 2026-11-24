@@ -83,6 +83,8 @@ struct SpawnOpts {
     caps_reply: Option<Vec<u8>>,
     /// Command-line arguments of the binary; empty opens the TUI.
     args: Vec<String>,
+    /// Binary to spawn; `None` is the cargo-built `workspace-status`.
+    bin: Option<PathBuf>,
 }
 
 impl Default for SpawnOpts {
@@ -94,6 +96,7 @@ impl Default for SpawnOpts {
             bg_reply: None,
             caps_reply: None,
             args: Vec::new(),
+            bin: None,
         }
     }
 }
@@ -401,6 +404,31 @@ impl PtySession {
         )
     }
 
+    /// [`Self::open_pending`] for a copy of the binary at `bin`, started
+    /// with `args`. The update prompt tests copy the binary so a fake
+    /// install can replace that copy, never the cargo-built file.
+    pub fn open_pending_bin(
+        workspace: &Path,
+        extra_env: &[(&str, &str)],
+        last_check_unix: u64,
+        bin: &Path,
+        args: &[&str],
+    ) -> Self {
+        Self::spawn(
+            workspace,
+            COLS,
+            ROWS,
+            extra_env,
+            SpawnOpts {
+                last_check_unix: Some(last_check_unix),
+                wait_ready: false,
+                args: args.iter().map(|arg| arg.to_string()).collect(),
+                bin: Some(bin.to_path_buf()),
+                ..SpawnOpts::default()
+            },
+        )
+    }
+
     fn spawn(
         workspace: &Path,
         cols: u16,
@@ -415,6 +443,7 @@ impl PtySession {
             bg_reply,
             caps_reply,
             args,
+            bin,
         } = opts;
         assert!(
             workspace.is_dir(),
@@ -431,7 +460,7 @@ impl PtySession {
             })
             .expect("openpty");
 
-        let bin = env!("CARGO_BIN_EXE_workspace-status");
+        let bin = bin.unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_workspace-status")));
         let mut cmd = CommandBuilder::new(bin);
         cmd.args(&args);
         cmd.cwd(workspace);

@@ -1,28 +1,13 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{documented_launch_first_paint, prove_keys_handled, WAIT};
+use crate::update_support::{
+    startup_update_prompt_blocking, write_fake_updater, write_release_curl,
+};
 
 use workspace_status::update_check::UPDATE_PROMPT_SUFFIX;
-
-/// Startup prompt on the primary screen. TUI chrome must not be up yet.
-///
-/// Docs: a newer GitHub Release prints the versioned update prompt before the TUI
-/// mounts. A skipped check, a quiet failure, or an already-mounted TUI
-/// cannot pass. `y` would print `Updating ` and run the sidecar.
-fn startup_update_prompt_blocking(screen: &str) -> bool {
-    screen.contains("→ 99.0.0 available. Update? [y/N]")
-        && screen.contains(UPDATE_PROMPT_SUFFIX)
-        && !documented_launch_first_paint(screen)
-        && !screen.contains("? help")
-        && !screen.contains(" tree")
-        && !screen.contains("Updating ")
-        && !screen.contains("SIDECAR_RAN")
-        && !screen.contains("failed to run workspace-status-update")
-}
 
 /// `n` declined the update. Documented first paint is up. Prompt is gone.
 ///
@@ -36,13 +21,6 @@ fn declined_update_opened_tui(screen: &str) -> bool {
         && !screen.contains("failed to run workspace-status-update")
 }
 
-fn write_executable(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
-    let mut perms = fs::metadata(path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(path, perms).unwrap();
-}
-
 fn curl_log_is_latest_only(log: &str) -> bool {
     log.contains("/releases/latest") && !log.contains("per_page=")
 }
@@ -51,8 +29,9 @@ fn curl_log_is_latest_only(log: &str) -> bool {
 ///
 /// Docs: CLI long_about, architecture, tui-rust. A TTY launch with a
 /// newer published release asks `workspace-status <current> → 99.0.0
-/// available. Update? [y/N]` on the primary screen before the TUI. `y` runs `--update` (notes,
-/// then `workspace-status-update`). `n` / `no` open the TUI. Offline /
+/// available. Update? [y/N]` on the primary screen before the TUI. `y` runs the update (notes,
+/// then `workspace-status-update`; the `pty_update_prompt_y_*` tests).
+/// `n` / `no` open the TUI. Offline /
 /// current / missing curl stay quiet and never print the prompt.
 ///
 /// Encoding: `stdin.read_line` before ratatui mounts. That is not the
@@ -68,38 +47,13 @@ fn pty_update_prompt_n_opens_tui() {
     let (_root, workspace) = daily_workspace();
     let shim_dir = workspace.join(".e2e-curl-shim");
     fs::create_dir_all(&shim_dir).unwrap();
-    let curl_log = shim_dir.join("curl.log");
+    let curl_log = write_release_curl(&shim_dir);
     let sidecar_marker = shim_dir.join("sidecar.ran");
-    write_executable(
-        &shim_dir.join("curl"),
-        &format!(
-            "#!/bin/sh\n\
-             printf '%s\\n' \"$*\" >> \"{log}\"\n\
-             for a in \"$@\"; do\n\
-               case \"$a\" in\n\
-                 *releases/latest*)\n\
-                   printf '%s\\n' '{{\"tag_name\":\"v99.0.0\"}}'\n\
-                   exit 0\n\
-                   ;;\n\
-                 *releases*)\n\
-                   printf '%s\\n' '[ {{\"tag_name\":\"v99.0.0\",\"draft\":false,\"prerelease\":false,\"body\":\"## [99.0.0]\\n\\n### Features\\n\\n- release notes\\n\\n## Install workspace-status 99.0.0\\n\"}} ]'\n\
-                   exit 0\n\
-                   ;;\n\
-               esac\n\
-             done\n\
-             exit 1\n",
-            log = curl_log.display()
-        ),
-    );
-    write_executable(
+    write_fake_updater(
         &shim_dir.join("workspace-status-update"),
-        &format!(
-            "#!/bin/sh\n\
-             printf sidecar-ran > \"{marker}\"\n\
-             printf 'SIDECAR_RAN\\n'\n\
-             exit 0\n",
-            marker = sidecar_marker.display()
-        ),
+        &sidecar_marker,
+        None,
+        0,
     );
     let path = format!(
         "{}:{}",
@@ -127,7 +81,7 @@ fn pty_update_prompt_n_opens_tui() {
         "n declines: documented first paint, prompt gone, no update/install",
         WAIT,
     );
-    tui.assert_running("after n (must open TUI, not exec the sidecar)");
+    tui.assert_running("after n (must open TUI, not run the sidecar)");
     prove_keys_handled(&mut tui);
     tui.wait_pred(
         declined_update_opened_tui,
