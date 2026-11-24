@@ -1,0 +1,1 @@
+{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com","login":"octo-main","tokenSource":"keyring","scopes":"gist, read:org, repo","gitProtocol":"ssh"},{"state":"success","active":false,"host":"github.com","login":"octo-work","tokenSource":"keyring","scopes":"gist, read:org, repo","gitProtocol":"ssh"}]}}

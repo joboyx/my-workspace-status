@@ -11,6 +11,8 @@ The scripts read flags and the `glab api` endpoint, not whole argv strings, so a
 | `gh pr list -R <host>/<owner>/<repo> --head <branch> …` | `gh/<owner>__<repo>/pr-list/<branch>.json` |
 | `gh pr list -R <host>/<owner>/<repo> --base <branch> …` (no `--head`) | `gh/<owner>__<repo>/pr-list-base/<branch>.json` |
 | `gh pr view <n> -R <host>/<owner>/<repo> …` | `gh/<owner>__<repo>/pr-view/<n>.json` |
+| `gh auth status --hostname <host> --json hosts` | `gh/auth-status.json` |
+| `gh auth token --hostname <host> --user <login>` | `gh/auth-token/<login>.txt` |
 | `glab api … projects/<path>/merge_requests?source_branch=<branch>&…` | `glab/<path>/mr-list/<branch>.json` |
 | `glab api … projects/<path>/merge_requests?target_branch=<branch>&…` (no `source_branch`) | `glab/<path>/mr-list-base/<branch>.json` |
 | `glab api … projects/<path>/merge_requests/<iid>` | `glab/<path>/mr/<iid>.json` |
@@ -20,6 +22,10 @@ The scripts read flags and the `glab api` endpoint, not whole argv strings, so a
 - In a file name, `/` becomes `__`: branch `feature/x` is `feature__x`, project `acme/services/api` is `acme__services__api`.
 - `-R host/owner/repo` and `-R owner/repo` both work. `glab` endpoints arrive URL-encoded (`projects/acme%2Fservices%2Fapi/…?source_branch=feature%2Fx`); the script decodes them.
 - The file holds the exact stdout the real CLI would print.
+
+## Several `gh` accounts
+
+A `gh pr` call with a token in `GH_TOKEN` (or `GH_ENTERPRISE_TOKEN`) answers from `gh/as/<token>/<owner>__<repo>/…` when that scenario file (or its `.exit` file) exists there, else from `gh/<owner>__<repo>/…`. So the active account (no token) can get `Could not resolve to a Repository` while the account whose token file holds `<token>` gets the PR. The `github-second-account` scenario set of the verify skill does this with `fake-token-octo-work`.
 
 ## Failures
 

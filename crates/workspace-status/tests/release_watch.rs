@@ -642,6 +642,35 @@ fn tty_spawn_paths_drop_parent_pr_poll_period() {
 }
 
 #[test]
+fn tty_spawn_paths_drop_parent_gh_tokens() {
+    // A parent `gh` token makes the TUI run every GitHub call as is, so the
+    // account fallback a test drives through the fake forge would not run.
+    // A test that wants a token passes its own.
+    assert!(
+        DESKTOP_HARNESS.contains(
+            r#".push_str("unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN\n");"#
+        ),
+        "tui_tty_e2e/desktop.rs must unset a parent GH_TOKEN, GITHUB_TOKEN, \
+         GH_ENTERPRISE_TOKEN and GITHUB_ENTERPRISE_TOKEN"
+    );
+    for var in [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+    ] {
+        assert!(
+            PTY_HARNESS.contains(&format!("env_remove(\"{var}\")")),
+            "tui_tty_e2e/harness.rs must drop a parent {var}"
+        );
+        assert!(
+            unsets_var(VERIFY_SH, var),
+            "scripts/verify-tui.sh must unset {var} for a fake-forge run"
+        );
+    }
+}
+
+#[test]
 fn tty_spawn_paths_drop_parent_caps_query_timeout() {
     // `ws doctor` reads WS_STATUS_CAPS_QUERY_TIMEOUT_MS as a test hook for
     // its terminal wait. A parent value (left from a manual try) must not

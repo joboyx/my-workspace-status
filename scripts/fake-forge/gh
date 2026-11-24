@@ -1,8 +1,8 @@
 #!/bin/sh
-# Fake `gh` for e2e tests. Answers `gh pr list` (by `--head` or `--base`) and
-# `gh pr view` from scenario files under $WS_FAKE_FORGE_DIR. It reads flags,
-# not exact argv strings, so a change to the `--json` field list does not
-# matter. Format: README.md.
+# Fake `gh` for e2e tests. Answers `gh pr list` (by `--head` or `--base`),
+# `gh pr view`, `gh auth status` and `gh auth token` from scenario files under
+# $WS_FAKE_FORGE_DIR. It reads flags, not exact argv strings, so a change to
+# the `--json` field list does not matter. Format: README.md.
 
 dir=${WS_FAKE_FORGE_DIR:-}
 if [ -z "$dir" ] || [ ! -d "$dir" ]; then
@@ -62,6 +62,28 @@ else
   shift $#
 fi
 
+# The logged-in accounts: `gh auth status ... --json hosts` and
+# `gh auth token ... --user <login>`. `--hostname` is ignored.
+if [ "$group" = auth ]; then
+  user=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -u | --user)
+        user=${2:-}
+        [ $# -ge 2 ] && shift
+        ;;
+      --user=*) user=${1#--user=} ;;
+    esac
+    shift
+  done
+  case $verb in
+    status) serve "$dir/gh/auth-status.json" ;;
+    token) [ -n "$user" ] && serve "$dir/gh/auth-token/$(slug "$user").txt" ;;
+  esac
+  printf 'fake forge: no scenario for %s\n' "$argv" >&2
+  exit 1
+fi
+
 repo=
 head=
 base_branch=
@@ -106,17 +128,35 @@ if [ -z "$repo" ] || [ "$owner" = "$repo" ]; then
   exit 1
 fi
 base=$dir/gh/${owner}__${name}
+# A call with a token in GH_TOKEN (GH_ENTERPRISE_TOKEN on other hosts) runs
+# as the account of that token: a scenario file under
+# gh/as/<token>/<owner>__<repo>/ wins over the one under gh/<owner>__<repo>/.
+as_base=
+token=${GH_TOKEN:-${GH_ENTERPRISE_TOKEN:-}}
+case $token in
+  '' | *[!A-Za-z0-9_-]*) ;;
+  *) as_base=$dir/gh/as/$token/${owner}__${name} ;;
+esac
+
+# Answer from scenario $1 (relative to the repo directory), as the token's
+# account when it has that scenario.
+answer() {
+  if [ -n "$as_base" ] && { [ -f "$as_base/$1" ] || [ -f "$as_base/$1.exit" ]; }; then
+    serve "$as_base/$1"
+  fi
+  serve "$base/$1"
+}
 
 case "$group $verb" in
   'pr list')
     # `--head` lists the PRs of one branch; `--base` alone lists the PRs
     # that target one branch (the stack children).
     if [ -z "$head" ] && [ -n "$base_branch" ]; then
-      serve "$base/pr-list-base/$(slug "$base_branch").json"
+      answer "pr-list-base/$(slug "$base_branch").json"
     fi
-    serve "$base/pr-list/$(slug "$head").json"
+    answer "pr-list/$(slug "$head").json"
     ;;
-  'pr view') serve "$base/pr-view/$number.json" ;;
+  'pr view') answer "pr-view/$number.json" ;;
 esac
 printf 'fake forge: no scenario for %s\n' "$argv" >&2
 exit 1
