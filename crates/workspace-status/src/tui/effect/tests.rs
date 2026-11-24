@@ -5923,18 +5923,26 @@ fn opened_urls() -> Vec<String> {
     OPENED.with(|urls| urls.borrow_mut().drain(..).collect())
 }
 
-pub(super) fn gh_approved_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+pub(super) fn gh_approved_pr(
+    argv: &[String],
+    _: Option<&GhToken>,
+    _: &AtomicBool,
+) -> Result<String, Option<String>> {
     assert_eq!(argv.first().map(String::as_str), Some("gh"), "{argv:?}");
     Ok(format!(
         r#"[{{"number":7,"state":"OPEN","url":"{PR_URL}","headRefName":"feature","isCrossRepository":false,"reviewDecision":"APPROVED","updatedAt":"2026-01-02T00:00:00Z"}}]"#
     ))
 }
 
-pub(super) fn gh_no_pr(_: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+pub(super) fn gh_no_pr(
+    _: &[String],
+    _: Option<&GhToken>,
+    _: &AtomicBool,
+) -> Result<String, Option<String>> {
     Ok("[]".into())
 }
 
-fn gh_fails(_: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+fn gh_fails(_: &[String], _: Option<&GhToken>, _: &AtomicBool) -> Result<String, Option<String>> {
     Err(Some(
         "HTTP 401: Bad credentials (https://api.github.com/graphql)".into(),
     ))
@@ -5944,7 +5952,11 @@ fn gh_fails(_: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
 const GH_FAILS_STATUS: &str =
     "could not look up PR for feature: HTTP 401: Bad credentials (https://api.github.com/graphql)";
 
-fn cli_must_not_run(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+fn cli_must_not_run(
+    argv: &[String],
+    _: Option<&GhToken>,
+    _: &AtomicBool,
+) -> Result<String, Option<String>> {
     panic!("no forge CLI expected: {argv:?}")
 }
 
@@ -6056,7 +6068,11 @@ const GL_MR_URL: &str = "https://gitlab.com/acme/services/api/-/merge_requests/1
 const GL_PIPELINE_URL: &str = "https://gitlab.com/acme/services/api/-/pipelines/99";
 
 /// `gh pr list`: PR #7 with a failed check that links its job.
-fn gh_failed_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+fn gh_failed_pr(
+    argv: &[String],
+    _: Option<&GhToken>,
+    _: &AtomicBool,
+) -> Result<String, Option<String>> {
     assert_eq!(argv.first().map(String::as_str), Some("gh"), "{argv:?}");
     Ok(format!(
         r#"[{{"number":7,"state":"OPEN","url":"{PR_URL}","headRefName":"feature","isCrossRepository":false,"statusCheckRollup":[{{"name":"test","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"{FAILED_JOB_URL}"}}]}}]"#
@@ -6065,7 +6081,11 @@ fn gh_failed_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String
 
 /// `glab api`: MR !12 on the list call, its failed head pipeline on the
 /// MR call.
-fn glab_failed_mr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+fn glab_failed_mr(
+    argv: &[String],
+    _: Option<&GhToken>,
+    _: &AtomicBool,
+) -> Result<String, Option<String>> {
     assert_eq!(argv.first().map(String::as_str), Some("glab"), "{argv:?}");
     let endpoint = argv.last().expect("endpoint");
     if endpoint.contains("merge_requests?") {
@@ -6204,7 +6224,7 @@ fn test_build_defaults_fail_without_a_forge_cli_or_browser() {
     );
     let mut interp = Interpreter::with_cap(4);
     let live = AtomicBool::new(false);
-    assert_eq!((interp.pr_cli)(&["gh".to_string()], &live), Err(None));
+    assert_eq!((interp.pr_cli)(&["gh".to_string()], None, &live), Err(None));
     assert_eq!((interp.pr_opener)(PR_URL, &live), Err(()));
     let effect = state.dispatch(Action::OpenPullRequest);
     let opts = opts(&state);
@@ -6215,7 +6235,11 @@ fn test_build_defaults_fail_without_a_forge_cli_or_browser() {
 
 /// Answers "no PR" until the quit flag is set, then fails as a killed
 /// CLI would.
-fn gh_no_pr_until_cancelled(_: &[String], cancel: &AtomicBool) -> Result<String, Option<String>> {
+fn gh_no_pr_until_cancelled(
+    _: &[String],
+    _: Option<&GhToken>,
+    cancel: &AtomicBool,
+) -> Result<String, Option<String>> {
     if cancel.load(Ordering::Relaxed) {
         Err(None)
     } else {
@@ -6456,7 +6480,11 @@ const DETAIL_REMOTE: &str = "git@github.com:octo/demo.git";
 
 /// Answers `gh pr view` for PR 7 until the quit flag is set, then fails
 /// as a killed CLI would.
-fn gh_view_until_cancelled(argv: &[String], cancel: &AtomicBool) -> Result<String, Option<String>> {
+fn gh_view_until_cancelled(
+    argv: &[String],
+    _: Option<&GhToken>,
+    cancel: &AtomicBool,
+) -> Result<String, Option<String>> {
     assert_eq!(
         argv.get(..3),
         Some(&["gh".to_string(), "pr".into(), "view".into()][..])
@@ -6905,6 +6933,54 @@ fn a_failing_pr_lookup_job_toasts_its_host_outage_once_until_it_works() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A `gh` with two logged-in accounts on github.com: only `octo-work`
+/// (token `tok-octo-work`) can see the repository; the active account gets
+/// GitHub's "cannot resolve" error.
+fn gh_second_account_sees_the_repo(
+    argv: &[String],
+    token: Option<&GhToken>,
+    _: &AtomicBool,
+) -> Result<String, Option<String>> {
+    match (argv[1].as_str(), argv[2].as_str()) {
+        ("auth", "status") => Ok(r#"{"hosts":{"github.com":[{"login":"octo-main","active":true,"state":"success"},{"login":"octo-work","active":false,"state":"success"}]}}"#.into()),
+        ("auth", "token") => Ok("tok-octo-work\n".into()),
+        _ if token.map(GhToken::env) == Some(("GH_TOKEN", "tok-octo-work")) => {
+            gh_approved_pr(argv, None, &AtomicBool::new(false))
+        }
+        _ => Err(Some(
+            "GraphQL: Could not resolve to a Repository with the name 'octo/demo'. (repository)"
+                .into(),
+        )),
+    }
+}
+
+/// The active `gh` account cannot see the repository, another logged-in
+/// account can: the badge lands with no outage toast and no failure mark.
+#[test]
+fn a_pr_lookup_that_another_gh_account_can_see_raises_no_outage() {
+    let (root, mut state) = pr_app("ws-effect-pr-account", Some("git@github.com:octo/demo.git"));
+    let path = Path::new("app");
+    let mut interp = Interpreter::with_cap(8);
+    let tui_opts = opts(&state);
+    interp.pr_cli = gh_second_account_sees_the_repo;
+    interp.queue_due_pr_lookups(&mut state, &tui_opts);
+    drain_jobs(&mut interp, &mut state, 10);
+    assert_eq!(
+        state.pr_badge(path),
+        Some(crate::tui::pr_status::PrState::Ready)
+    );
+    assert_eq!(state.pr_lookup_failure(path), None);
+    assert!(state.outages.is_empty(), "no outage");
+    assert!(
+        !state
+            .toasts
+            .visible(Instant::now())
+            .any(|(toast, _)| toast.is_outage()),
+        "no toast"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn a_poll_tick_queues_pollable_checkouts_once() {
     let mut state = fixture_state();
@@ -6952,7 +7028,11 @@ fn stack_calls() -> Vec<String> {
 /// `gh pr list` of the chain #7 (`feature/a` into `main`) → #8
 /// (`feature`): `--head` answers the PR of that branch, any other list
 /// (children) none.
-fn gh_stacked_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+fn gh_stacked_pr(
+    argv: &[String],
+    _: Option<&GhToken>,
+    _: &AtomicBool,
+) -> Result<String, Option<String>> {
     STACK_CALLS.with(|calls| calls.borrow_mut().push(argv.join(" ")));
     let head = argv
         .iter()
@@ -6972,12 +7052,16 @@ fn gh_stacked_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<Strin
 
 /// [`gh_stacked_pr`] whose every call but the badge lookup of `feature`
 /// fails: the stack walk fails, the badge lookup works.
-fn gh_stack_walk_fails(argv: &[String], cancel: &AtomicBool) -> Result<String, Option<String>> {
+fn gh_stack_walk_fails(
+    argv: &[String],
+    _: Option<&GhToken>,
+    cancel: &AtomicBool,
+) -> Result<String, Option<String>> {
     let badge = argv
         .windows(2)
         .any(|pair| pair[0] == "--head" && pair[1] == "feature");
     if badge {
-        gh_stacked_pr(argv, cancel)
+        gh_stacked_pr(argv, None, cancel)
     } else {
         STACK_CALLS.with(|calls| calls.borrow_mut().push(argv.join(" ")));
         Err(Some("HTTP 502: Bad Gateway".into()))
@@ -7061,7 +7145,11 @@ fn the_badge_job_walks_the_stack_of_a_found_pr_and_lands_it() {
 
 // ---- PR change alerts ----
 
-pub(super) fn gh_merged_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+pub(super) fn gh_merged_pr(
+    argv: &[String],
+    _: Option<&GhToken>,
+    _: &AtomicBool,
+) -> Result<String, Option<String>> {
     assert_eq!(argv.first().map(String::as_str), Some("gh"), "{argv:?}");
     Ok(format!(
         r#"[{{"number":7,"state":"MERGED","url":"{PR_URL}","headRefName":"feature","isCrossRepository":false,"updatedAt":"2026-01-03T00:00:00Z"}}]"#

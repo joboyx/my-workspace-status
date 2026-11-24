@@ -46,6 +46,7 @@ use super::fetch_claim::unix_now_ms;
 use super::hyperlink::{link_cells, write_links};
 use super::keys::{drop_g_chord_echo_at, held_nav_key, is_half_page_chord, KeyStrokeOrigin};
 use super::pointer_shape::{shape_for, TermPointer};
+use super::pr_account::{EnvTokens, PrAccounts};
 use super::render::draw;
 use super::state::{AppState, PendingConfirm};
 use super::status::StatusMessage;
@@ -434,6 +435,10 @@ pub async fn run(
         pointer,
         quit: false,
     };
+    ctx.interp.set_pr_accounts(PrAccounts::new(
+        EnvTokens::from_env(|name| std::env::var(name).ok()),
+        Some(opts.settings.ui_store.clone()),
+    ));
     ctx.interp
         .schedule(ctx.state, ctx.opts, Effect::LoadRightPane, &Action::None);
     // Watch ticks look up only new or changed branches; the first snapshot

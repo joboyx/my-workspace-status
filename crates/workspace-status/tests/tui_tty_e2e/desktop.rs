@@ -83,6 +83,9 @@ impl DesktopSession {
         );
         // A parent PR poll period would poll the fixture's forge remotes.
         script.push_str("unset WS_STATUS_PR_POLL_MS\n");
+        // A parent `gh` token would turn off the `gh` account fallback.
+        script
+            .push_str("unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN\n");
         script.push_str("export TERM=xterm-256color COLORTERM=truecolor\n");
         script.push_str("export LANG=C.UTF-8 LC_ALL=C.UTF-8\n");
         script.push_str("export WS_STATUS_GLYPHS=ascii\n");

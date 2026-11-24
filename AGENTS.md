@@ -76,6 +76,8 @@ PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` also unset `WS_STATUS
 
 PTY and desktop e2e also drop a parent `WS_STATUS_PR_POLL_MS` (the verify driver pins it to `0`), so a test that leaves it unset never polls the fake forge. CI: `tty_spawn_paths_drop_parent_pr_poll_period`.
 
+PTY and desktop e2e also drop a parent `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` (the verify driver unsets them under `--fake-forge`), so an operator token cannot turn off the `gh` account fallback that a test drives through the fake forge. CI: `tty_spawn_paths_drop_parent_gh_tokens`.
+
 The PTY harness also drops a parent `WS_STATUS_CAPS_QUERY_TIMEOUT_MS` (a test hook of `ws doctor`), so the capability wait stays at its 200 ms default unless a test passes it. CI: `tty_spawn_paths_drop_parent_caps_query_timeout`.
 
 They also point `XDG_CONFIG_HOME` at a temp dir (PTY and desktop e2e write a fixed baseline config file there, see [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md)), so the operator user config file (`$XDG_CONFIG_HOME/my-workspace-status/config.json`, else `~/.config/...`) cannot change the fixture's settings. CLI integration tests that run the binary do the same. CI: `tty_spawn_paths_isolate_user_config`.

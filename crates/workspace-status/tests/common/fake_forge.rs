@@ -116,6 +116,53 @@ impl FakeForge {
         self.put(&format!("gh/{}/pr-view/{number}.json", slug(repo)), reply);
     }
 
+    /// Answer for `gh auth status --hostname <host> --json hosts`: the
+    /// logged-in accounts, on any host.
+    pub fn github_auth_status(&self, json: &str) {
+        self.put("gh/auth-status.json", Reply::Json(json));
+    }
+
+    /// Answer for `gh auth token --hostname <host> --user <login>`: prints
+    /// `token`.
+    pub fn github_auth_token(&self, login: &str, token: &str) {
+        self.put(
+            &format!("gh/auth-token/{}.txt", slug(login)),
+            Reply::Json(&format!("{token}\n")),
+        );
+    }
+
+    /// [`Self::github_pr_list`] for a call that runs with `token` in
+    /// `GH_TOKEN`: what that account sees. A call with no token, or another
+    /// token, gets the answer of [`Self::github_pr_list`].
+    pub fn github_pr_list_as(&self, token: &str, repo: &str, branch: &str, reply: Reply<'_>) {
+        self.put(
+            &format!("gh/as/{token}/{}/pr-list/{}.json", slug(repo), slug(branch)),
+            reply,
+        );
+    }
+
+    /// [`Self::github_pr_list_base`] for a call that runs with `token` in
+    /// `GH_TOKEN`.
+    pub fn github_pr_list_base_as(&self, token: &str, repo: &str, branch: &str, reply: Reply<'_>) {
+        self.put(
+            &format!(
+                "gh/as/{token}/{}/pr-list-base/{}.json",
+                slug(repo),
+                slug(branch)
+            ),
+            reply,
+        );
+    }
+
+    /// [`Self::github_pr_view`] for a call that runs with `token` in
+    /// `GH_TOKEN`.
+    pub fn github_pr_view_as(&self, token: &str, repo: &str, number: u64, reply: Reply<'_>) {
+        self.put(
+            &format!("gh/as/{token}/{}/pr-view/{number}.json", slug(repo)),
+            reply,
+        );
+    }
+
     /// Answer for the GitLab merge request list of `branch` in `project`
     /// (`group/sub/project`).
     pub fn gitlab_mr_list(&self, project: &str, branch: &str, reply: Reply<'_>) {
@@ -375,8 +422,84 @@ mod tests {
         let (code, out, err) = run(&forge, "gh", &view);
         assert_eq!((code, out.as_str(), err.as_str()), (0, "{gh-view-2}", ""));
 
+        // Accounts: `gh auth status`, `gh auth token`, and a list call that
+        // answers per token.
+        forge.github_auth_status(r#"{"hosts":{}}"#);
+        forge.github_auth_token("octo-work", "fake-token-octo-work");
+        forge.github_pr_list_as(
+            "fake-token-octo-work",
+            "acme/app",
+            "feature/x",
+            Reply::Json("[gh-list-as-work]"),
+        );
+        let (code, out, _) = run(
+            &forge,
+            "gh",
+            &[
+                "auth",
+                "status",
+                "--hostname",
+                "github.com",
+                "--json",
+                "hosts",
+            ],
+        );
+        assert_eq!(
+            (code, out.as_str()),
+            (0, r#"{"hosts":{}}"#),
+            "gh auth status"
+        );
+        let token = [
+            "auth",
+            "token",
+            "--hostname",
+            "github.com",
+            "--user",
+            "octo-work",
+        ];
+        let (code, out, _) = run(&forge, "gh", &token);
+        assert_eq!((code, out.as_str()), (0, "fake-token-octo-work\n"));
+        let (code, _, _) = run(
+            &forge,
+            "gh",
+            &[
+                "auth",
+                "token",
+                "--hostname",
+                "github.com",
+                "--user",
+                "octo-x",
+            ],
+        );
+        assert_eq!(code, 1, "a login with no token file");
+        let as_work = Command::new("gh")
+            .args(list)
+            .envs(forge.env())
+            .env("GH_TOKEN", "fake-token-octo-work")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&as_work.stdout),
+            "[gh-list-as-work]"
+        );
+        let as_other = Command::new("gh")
+            .args(list)
+            .envs(forge.env())
+            .env("GH_TOKEN", "fake-token-octo-main")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&as_other.stdout),
+            "[gh-list]",
+            "another token sees the default answer"
+        );
+
         let calls = forge.calls();
-        assert_eq!(calls.len(), 12, "one log line per call: {calls:?}");
+        assert_eq!(calls.len(), 17, "one log line per call: {calls:?}");
+        assert!(
+            calls.iter().all(|call| !call.contains("fake-token")),
+            "a token never reaches argv: {calls:?}"
+        );
         assert_eq!(
             calls[0],
             "gh pr list -R github.com/acme/app --head feature/x --json a,b,c"

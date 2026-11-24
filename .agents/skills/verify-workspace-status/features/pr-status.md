@@ -335,6 +335,25 @@ Expect on `stack-badges`: the `app` row `& feature/auth-refresh` ends in `#7 2/4
 
 **PASS:** the four waits pass, the `grep -c` prints `0`, the calls line prints PASS, and the `stack-badges-nerd` capture shows `#7 ⧗2/4 ✕`, `#8 ⧗3/4 ○` and `!5 ⧗2/3 ◐`, each glyph in the last tree column. PTY proof: `pty_pr_stack_badge_marks_the_position_on_both_forges`.
 
+## PS11 A repo only a second `gh` account can see
+
+With several `gh` accounts on one host, a lookup that the active account cannot see runs again as each other logged-in account, with that account's token in `GH_TOKEN` of that one call (`docs/configuration.md`, **Several `gh` accounts**). In the `github-second-account` set only `octo-work` sees `acme/app`.
+
+```bash
+fresh context github-second-account gitlab-review -- --fake-forge "$FORGE"
+$V wait "$RUN" '#7 P' && $V wait "$RUN" '!5 P'
+$V wait "$RUN" 'PR lookup failed' 3 && echo "FAIL outage" || echo "PASS no outage"   # the wait timeout line is expected
+$V capture "$RUN" second-account | grep -c 'Esc dismiss' || true    # 0: no toast
+CALLS=$($V calls "$RUN")
+grep -qF 'gh auth status --hostname github.com --json hosts' <<<"$CALLS" &&
+  grep -qF 'gh auth token --hostname github.com --user octo-work' <<<"$CALLS" &&
+  ! grep -qF 'fake-token' <<<"$CALLS" && echo "PASS the fallback asked gh, no token on argv"
+grep -F '"github.com/acme": "octo-work"' "$RUN/state/ui-state.json" && ! grep -qF 'fake-token' "$RUN/state/ui-state.json" &&
+  echo "PASS the account is kept, no token in the file"
+```
+
+**PASS:** `#7 P` shows on the `app` row, the outage wait prints `PASS no outage`, the `grep -c` prints `0`, and both calls lines print PASS. PTY proof: `pty_pr_second_gh_account_shows_the_badge_with_no_outage`.
+
 ## Live
 
 Real `gh` and `glab` against public repos, read-only. Needs `gh`, `glab`, `jq` and `git` on `PATH`, `gh auth status` and `glab auth status` passing, and network. Pick the branches at run time, so the recipe does not rot when a PR closes. The Setup helpers above are used here too.

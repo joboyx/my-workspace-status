@@ -41,6 +41,7 @@ mod outage;
 pub(crate) mod persist;
 mod pointer_shape;
 mod popover;
+mod pr_account;
 mod pr_groups;
 pub(crate) mod pr_poll;
 mod pr_status;

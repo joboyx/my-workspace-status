@@ -495,7 +495,13 @@ impl PtySession {
         // wait; a test that wants another wait passes it.
         // `e` reads $VISUAL before $EDITOR, so an operator VISUAL would
         // outrank the stub EDITOR a test passes.
+        // An operator GH_TOKEN (or one of its siblings) would make the TUI
+        // skip the `gh` account fallback; a test that wants one passes it.
         cmd.env_remove("NO_COLOR");
+        cmd.env_remove("GH_TOKEN");
+        cmd.env_remove("GITHUB_TOKEN");
+        cmd.env_remove("GH_ENTERPRISE_TOKEN");
+        cmd.env_remove("GITHUB_ENTERPRISE_TOKEN");
         cmd.env_remove("FORCE_COLOR");
         cmd.env_remove("WS_STATUS_WORKSPACE");
         cmd.env_remove("WS_STATUS_THEME");
