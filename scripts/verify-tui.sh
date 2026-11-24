@@ -71,6 +71,15 @@ usage: scripts/verify-tui.sh <command> ...
                                  (without --reset the sets overlay what is there, and
                                  each file is renamed in, so it is the mid-run swap)
   calls <run>                    print the gh / glab calls this run made (fake forge)
+  update <entry> <outcome> | update all
+                                 start the app through an update entry path in a
+                                 run of its own, with a fake updater and a fake
+                                 curl beside a copy of the binary; print one
+                                 PASS / FAIL line per case; exit 1 on a FAIL.
+                                 entry: cli (ws --update -a), prompt (ws -a,
+                                 answer y), dev (ws-dev --update -a, dev build in
+                                 target/verify-dev); outcome: install, current,
+                                 fail
 
 <run> is the run dir that launch prints, or its id under the root.
 Root: $WS_VERIFY_ROOT, else ${TMPDIR:-/tmp}/ws-verify.
@@ -231,6 +240,101 @@ write_live_cli_config() {
 
 # ---------- launch ----------
 
+# The text of the startup update prompt, and the chrome of the TUI's first
+# paint. launch fails on the prompt (isolation broke); update answers it.
+UPDATE_PROMPT='Update? [y/N]'
+first_paint() { [[ "$1" == *"? help"* ]]; }
+
+# new_run [SUFFIX]: make a run dir under the root (id = UTC time, pid, SUFFIX)
+# and set RUN_DIR, EVIDENCE and SOCK.
+new_run() {
+  local root_real run_id
+  mkdir -p "$ROOT"
+  root_real="$(real_dir "$ROOT")"
+  run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$${1:+-$1}"
+  RUN_DIR="$root_real/$run_id"
+  RUN_ID="$run_id"
+  # $BROWSER splits on spaces and colons, so the recorder path may hold neither.
+  case "$RUN_DIR" in *[[:space:]:]*) die "run dir '$RUN_DIR' holds a space or colon; set WS_VERIFY_ROOT to a plain path" ;; esac
+  EVIDENCE="$RUN_DIR/evidence"
+  SOCK="ws-verify-$run_id"
+  mkdir -p "$EVIDENCE" "$RUN_DIR/config" "$RUN_DIR/state" "$RUN_DIR/browser"
+  : >"$RUN_DIR/run.env"
+  # The recorder appends each URL the TUI opens to opened.log, one per line.
+  cat >"$RUN_DIR/browser/open" <<EOF
+#!/bin/sh
+printf '%s\n' "\$1" >> $(printf '%q' "$RUN_DIR/opened.log")
+EOF
+  chmod +x "$RUN_DIR/browser/open"
+}
+
+# A fresh lastCheckUnix keeps the 6 h update prompt from blocking mount.
+stamp_update_check() {
+  printf '{\n  "version": 1,\n  "lastCheckUnix": %s\n}\n' "$(date +%s)" >"$RUN_DIR/state/update-check.json"
+}
+
+# write_launch FILE CWD RCFILE BIN [ARG]...: the pane's script: source the
+# run's env.sh, cd to CWD, exec BIN with the ARGs. With an RCFILE, run BIN as
+# a child instead, as a user's shell does, and write its exit code there:
+# tmux can leave an exited pane process unreaped for seconds, so
+# pane_dead_status is not there to read in time.
+write_launch() {
+  local file="$1" cwd="$2" rcfile="$3" bin="$4"
+  shift 4
+  {
+    echo '#!/usr/bin/env bash'
+    printf 'source %q\n' "$RUN_DIR/env.sh"
+    printf 'cd %q\n' "$cwd"
+    if [[ -n "$rcfile" ]]; then
+      printf 'rcfile=%q\n' "$rcfile"
+      printf '%q' "$bin"
+      printf ' %q' "$@"
+      echo
+      cat <<'EOF'
+rc=$?
+echo "$rc" >"$rcfile"
+exit "$rc"
+EOF
+    elif (($#)); then
+      printf 'exec %q' "$bin"
+      printf ' %q' "$@"
+      echo
+    else
+      printf 'exec %q\n' "$bin"
+    fi
+  } >"$file"
+  chmod +x "$file"
+}
+
+# record_run BIN FIXTURE FORGE SIZE: the run facts that load_run, stop and
+# wsctl read back.
+record_run() {
+  record RUN_ID "$RUN_ID"
+  record RUN_SOCK "$SOCK"
+  record RUN_BIN "$1"
+  record RUN_FIXTURE "$2"
+  record RUN_FORGE "$3"
+  # The checkout that made the run: wsctl refuses a run of another checkout.
+  record RUN_REPO "$REPO_ROOT"
+  # Runs share one forge dir and its calls.log. Remember where this run starts.
+  local calls_from=0
+  if [[ -n "$3" && -f "$3/calls.log" ]]; then calls_from="$(wc -l <"$3/calls.log" | tr -d ' ')"; fi
+  record RUN_CALLS_FROM "$calls_from"
+  record RUN_SIZE "$4"
+  record RUN_HEAD "$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  record RUN_VERSION "$("$1" --version </dev/null 2>&1 || echo unknown)"
+}
+
+# start_session COLS ROWS: start the run's private tmux server with launch.sh
+# in its one pane; the pane stays after the process exits (its status stays).
+start_session() {
+  tmux -L "$SOCK" -f /dev/null start-server \; set-option -g status off \; \
+    set-option -g remain-on-exit on \; \
+    new-session -d -s "$SESSION" -x "$1" -y "$2" "$(printf '%q' "$RUN_DIR/launch.sh")"
+  RUN_SOCKET_PATH="$(tm display-message -p '#{socket_path}')"
+  record RUN_SOCKET_PATH "$RUN_SOCKET_PATH"
+}
+
 cmd_launch() {
   local size=160x45 forge="" workspace="" extra=()
   while (($#)); do
@@ -265,15 +369,7 @@ cmd_launch() {
     fi
   fi
 
-  local run_id
-  run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  RUN_DIR="$root_real/$run_id"
-  # $BROWSER splits on spaces and colons, so the recorder path may hold neither.
-  case "$RUN_DIR" in *[[:space:]:]*) die "run dir '$RUN_DIR' holds a space or colon; set WS_VERIFY_ROOT to a plain path" ;; esac
-  EVIDENCE="$RUN_DIR/evidence"
-  SOCK="ws-verify-$run_id"
-  mkdir -p "$EVIDENCE" "$RUN_DIR/config" "$RUN_DIR/state" "$RUN_DIR/browser"
-  : >"$RUN_DIR/run.env"
+  new_run
 
   if [[ -z "$fixture" ]]; then
     fixture="$RUN_DIR/workspace"
@@ -292,52 +388,17 @@ cmd_launch() {
     fi
   fi
 
-  # The recorder appends each URL the TUI opens to opened.log, one per line.
-  cat >"$RUN_DIR/browser/open" <<EOF
-#!/bin/sh
-printf '%s\n' "\$1" >> $(printf '%q' "$RUN_DIR/opened.log")
-EOF
-  chmod +x "$RUN_DIR/browser/open"
-
-  # A fresh lastCheckUnix keeps the 6 h update prompt from blocking mount.
-  printf '{\n  "version": 1,\n  "lastCheckUnix": %s\n}\n' "$(date +%s)" >"$RUN_DIR/state/update-check.json"
-
+  stamp_update_check
   write_env_file "$RUN_DIR/env.sh" "$forge" ${extra[@]+"${extra[@]}"}
   cp "$RUN_DIR/env.sh" "$EVIDENCE/env.sh.txt"
-  local launch="$RUN_DIR/launch.sh"
-  {
-    echo '#!/usr/bin/env bash'
-    printf 'source %q\n' "$RUN_DIR/env.sh"
-    printf 'cd %q\n' "$fixture"
-    printf 'exec %q\n' "$bin"
-  } >"$launch"
-  chmod +x "$launch"
-
-  record RUN_ID "$run_id"
-  record RUN_SOCK "$SOCK"
-  record RUN_BIN "$bin"
-  record RUN_FIXTURE "$fixture"
-  record RUN_FORGE "$forge"
-  # The checkout that made the run: wsctl refuses a run of another checkout.
-  record RUN_REPO "$REPO_ROOT"
-  # Runs share one forge dir and its calls.log. Remember where this run starts.
-  local calls_from=0
-  if [[ -n "$forge" && -f "$forge/calls.log" ]]; then calls_from="$(wc -l <"$forge/calls.log" | tr -d ' ')"; fi
-  record RUN_CALLS_FROM "$calls_from"
-  record RUN_SIZE "$size"
-  record RUN_HEAD "$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-  record RUN_VERSION "$("$bin" --version </dev/null 2>&1 || echo unknown)"
-
-  tmux -L "$SOCK" -f /dev/null start-server \; set-option -g status off \; \
-    set-option -g remain-on-exit on \; \
-    new-session -d -s "$SESSION" -x "$cols" -y "$rows" "$(printf '%q' "$launch")"
-  RUN_SOCKET_PATH="$(tm display-message -p '#{socket_path}')"
-  record RUN_SOCKET_PATH "$RUN_SOCKET_PATH"
+  write_launch "$RUN_DIR/launch.sh" "$fixture" "" "$bin"
+  record_run "$bin" "$fixture" "$forge" "$size"
+  start_session "$cols" "$rows"
 
   local i scr=""
   for ((i = 0; i < 80; i++)); do
     scr="$(screen_text || true)"
-    if [[ "$scr" == *"Update? [y/N]"* ]]; then
+    if [[ "$scr" == *"$UPDATE_PROMPT"* ]]; then
       printf '%s\n' "$scr" >"$EVIDENCE/launch-failure.txt"
       end_server
       die "update prompt on screen (isolation failed); see $EVIDENCE/launch-failure.txt"
@@ -347,10 +408,10 @@ EOF
       end_server
       die "the TUI exited at launch; see $EVIDENCE/launch-failure.txt"
     fi
-    if [[ "$scr" == *"? help"* ]]; then break; fi
+    if first_paint "$scr"; then break; fi
     sleep 0.25
   done
-  if [[ "$scr" != *"? help"* ]]; then
+  if ! first_paint "$scr"; then
     printf '%s\n' "$scr" >"$EVIDENCE/launch-failure.txt"
     end_server
     die "no '? help' chrome after 20 s; see $EVIDENCE/launch-failure.txt"
@@ -516,17 +577,25 @@ cmd_wait() {
   done
 }
 
+# save_capture NAME [OPTION]...: save the screen to evidence/NN-NAME.txt and
+# .ansi (OPTIONs go to capture-pane); sets CAPTURE_BASE to the path without
+# the extension.
+save_capture() {
+  local name
+  name="$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-')"
+  shift
+  CAPTURE_BASE="$EVIDENCE/$(next_seq)-$name"
+  tm capture-pane -p "$@" -t "$SESSION" >"$CAPTURE_BASE.txt"
+  tm capture-pane -p -e "$@" -t "$SESSION" >"$CAPTURE_BASE.ansi"
+  log_action "capture $(basename "$CAPTURE_BASE")"
+}
+
 cmd_capture() {
   load_run "${1:-}"
   tm has-session -t "$SESSION" 2>/dev/null || die "no tmux session for this run: nothing to capture"
-  local name base
-  name="$(printf '%s' "${2:-screen}" | tr -c 'A-Za-z0-9._-' '-')"
-  base="$EVIDENCE/$(next_seq)-$name"
-  tm capture-pane -p -t "$SESSION" >"$base.txt"
-  tm capture-pane -p -e -t "$SESSION" >"$base.ansi"
-  log_action "capture $(basename "$base")"
-  cat "$base.txt"
-  echo "saved: $base.txt, $base.ansi" >&2
+  save_capture "${2:-screen}"
+  cat "$CAPTURE_BASE.txt"
+  echo "saved: $CAPTURE_BASE.txt, $CAPTURE_BASE.ansi" >&2
 }
 
 # The fake forge calls of this run: the lines of calls.log after the ones that
@@ -541,8 +610,8 @@ cmd_calls() {
   run_calls
 }
 
-cmd_stop() {
-  load_run "${1:-}"
+# Quit a live TUI with q (up to 3 s), then end the run's tmux server.
+quit_session() {
   local i
   if tm has-session -t "$SESSION" 2>/dev/null; then
     if [[ "$(pane_field pane_dead)" == 0 ]]; then
@@ -554,6 +623,11 @@ cmd_stop() {
     fi
   fi
   end_server
+}
+
+cmd_stop() {
+  load_run "${1:-}"
+  quit_session
   if [[ -n "$RUN_FORGE" ]]; then run_calls >"$EVIDENCE/forge-calls.log"; fi
   if [[ -f "$RUN_DIR/opened.log" ]]; then cp "$RUN_DIR/opened.log" "$EVIDENCE/opened.log"; fi
   log_action "stop"
@@ -614,6 +688,261 @@ cmd_cli() {
   cat "$base.err" >&2
   echo "verify-tui: rc $rc, evidence $base.{cmd,out,err,rc}" >&2
   return "$rc"
+}
+
+# ---------- update ----------
+
+# update <entry> <outcome> (or update all) starts the app through one of the
+# three update entry paths, as a user does, in a run of its own, and prints one
+# PASS / FAIL line. It is the one command that runs an updater, and only a fake
+# one beside a copy of the binary (cli refuses --update):
+#
+#   entry    cli      ws --update -a
+#            prompt   ws -a on a TTY with no update-check store; answers y Enter
+#            dev      ws-dev --update -a, a dev-marked build (it never prompts)
+#   outcome  install  the updater swaps the app for a "new version" that logs
+#                     its args and cwd to update/new-app.log, then runs an
+#                     untouched copy of the same binary
+#            current  the updater prints "already up to date" and exits 0
+#            fail     the updater prints "network error" to stderr and exits 1
+UPDATE_ENTRIES=(cli prompt dev)
+UPDATE_OUTCOMES=(install current fail)
+# PATH after the run's bin/: system dirs only, so no installed ws, updater,
+# ~/.local/bin or ~/.cargo/bin can answer.
+UPDATE_SYSTEM_PATH=/usr/bin:/bin:/usr/sbin:/sbin
+# The fixture cwd holds a space, so a relaunch must keep the cwd intact.
+UPDATE_CWD="work/sub dir"
+# Where the dev-marked build goes; never the checkout's target/debug.
+DEV_TARGET="$REPO_ROOT/target/verify-dev"
+
+# needs_build BIN: true when BIN is missing or a build input (sources,
+# manifests, the lock file; not the integration tests) is newer than it.
+needs_build() {
+  [[ -x "$1" ]] || return 0
+  local newer
+  newer="$(find "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/Cargo.lock" "$REPO_ROOT/crates" \
+    -path "$REPO_ROOT/crates/*/tests" -prune -o -type f -newer "$1" -print 2>/dev/null | head -n 1 || true)"
+  [[ -n "$newer" ]]
+}
+
+# update_source ENTRY: print the binary a case copies, built first when stale.
+# dev: the dev-marked ws in target/verify-dev; else the checkout's ws.
+update_source() {
+  local bin
+  if [[ "$1" == dev ]]; then
+    bin="$DEV_TARGET/debug/ws"
+    if needs_build "$bin"; then
+      echo "verify-tui: building the dev-marked ws into $DEV_TARGET (slow the first time)" >&2
+      (cd "$REPO_ROOT" && WS_STATUS_DEV_BUILD=verify CARGO_TARGET_DIR="$DEV_TARGET" cargo build --locked -p workspace-status) >&2
+    fi
+  else
+    bin="$(dirname "$(binary_path)")/ws"
+    if needs_build "$bin"; then
+      (cd "$REPO_ROOT" && cargo build -p workspace-status --bin ws) >&2
+    fi
+  fi
+  [[ -x "$bin" ]] || die "build finished but $bin is missing"
+  echo "$bin"
+}
+
+# update_fakes ENTRY OUTCOME SRC: bin/ gets a copy of SRC as the app, the fake
+# updater for OUTCOME and a fake curl; next/ gets the untouched copy that the
+# "new version" runs. Sets UPDATE_APP (ws, or ws-dev for dev).
+update_fakes() {
+  local outcome="$2" src="$3" updater="workspace-status-update"
+  UPDATE_APP=ws
+  if [[ "$1" == dev ]]; then
+    UPDATE_APP=ws-dev
+    updater="workspace-status-update-dev"
+  fi
+  mkdir -p "$RUN_DIR/bin" "$RUN_DIR/next" "$RUN_DIR/update"
+  cp "$src" "$RUN_DIR/bin/$UPDATE_APP"
+  cp "$src" "$RUN_DIR/next/$UPDATE_APP"
+  {
+    echo '#!/usr/bin/env bash'
+    echo '# The "new version" of a verify update run: log the start, run the app.'
+    printf 'log=%q\nnext=%q\n' "$RUN_DIR/update/new-app.log" "$RUN_DIR/next/$UPDATE_APP"
+    cat <<'EOF'
+printf 'args=[%s] cwd=%s\n' "$*" "$(pwd -P)" >>"$log"
+exec "$next" "$@"
+EOF
+  } >"$RUN_DIR/update/new-version"
+  {
+    echo '#!/usr/bin/env bash'
+    echo "# Fake updater of a verify update run ($outcome)."
+    printf 'log=%q\n' "$RUN_DIR/update/updater.log"
+    cat <<'EOF'
+printf '%s %s\n' "$(basename "$0")" "$*" >>"$log"
+EOF
+    case "$outcome" in
+      install)
+        printf 'app=%q\nnew=%q\n' "$RUN_DIR/bin/$UPDATE_APP" "$RUN_DIR/update/new-version"
+        cat <<'EOF'
+# Replace the app as an installer does: a copy beside it, then a rename.
+cp "$new" "$app.new.$$"
+chmod +x "$app.new.$$"
+mv -f "$app.new.$$" "$app"
+echo 'FAKE-UPDATER installed'
+EOF
+        ;;
+      current) echo "echo 'already up to date'" ;;
+      fail) printf '%s\n' "echo 'network error' >&2" 'exit 1' ;;
+    esac
+  } >"$RUN_DIR/bin/$updater"
+  {
+    echo '#!/usr/bin/env bash'
+    echo '# Fake curl of a verify update run: release v99.0.0 with one note.'
+    printf 'log=%q\n' "$RUN_DIR/update/curl.log"
+    cat <<'EOF'
+printf '%s\n' "$*" >>"$log"
+for a in "$@"; do
+  case "$a" in
+    */releases/latest*) printf '%s\n' '{"tag_name":"v99.0.0"}'; exit 0 ;;
+    */releases\?*) printf '%s\n' '[{"tag_name":"v99.0.0","draft":false,"prerelease":false,"body":"## [99.0.0]\n\n### Features\n\n- release notes\n\n## Install workspace-status 99.0.0\n"}]'; exit 0 ;;
+  esac
+done
+exit 22
+EOF
+  } >"$RUN_DIR/bin/curl"
+  chmod +x "$RUN_DIR/update/new-version" "$RUN_DIR/bin/$updater" "$RUN_DIR/bin/curl"
+}
+
+# update_watch SECONDS UNTIL: poll the pane until it is dead, until the prompt
+# is up (UNTIL=prompt) or until the first paint (UNTIL=paint); 1 on timeout.
+# Sets UPDATE_PAINTED=1 once a sample shows the first paint.
+update_watch() {
+  local end=$((SECONDS + $1)) scr
+  while :; do
+    scr="$(screen_text || true)"
+    if first_paint "$scr"; then UPDATE_PAINTED=1; fi
+    if [[ "$2" == prompt && "$scr" == *"$UPDATE_PROMPT"* ]]; then return 0; fi
+    if [[ "$2" == paint ]] && first_paint "$scr"; then return 0; fi
+    if [[ "$(pane_field pane_dead)" == 1 ]]; then return 0; fi
+    if ((SECONDS >= end)); then return 1; fi
+    sleep 0.2
+  done
+}
+
+# update_case ENTRY OUTCOME: one case; prints its line, returns 1 on FAIL.
+update_case() {
+  local entry="$1" outcome="$2" src name="update-$1-$2"
+  src="$(update_source "$entry")"
+  new_run "$name"
+  local fixture="$RUN_DIR/$UPDATE_CWD"
+  "$SCRIPT_DIR/seed-demo-workspace.sh" "$fixture" >"$EVIDENCE/seed.log" 2>&1 ||
+    die "seed failed, see $EVIDENCE/seed.log"
+  fixture="$(real_dir "$fixture")"
+  update_fakes "$entry" "$outcome" "$src"
+  # The prompt needs a due check, so its store stays absent. --update skips
+  # the check; those entries keep the fresh store of every run.
+  if [[ "$entry" != prompt ]]; then stamp_update_check; fi
+  mkdir -p "$RUN_DIR/forge"
+  write_env_file "$RUN_DIR/env.sh" "$RUN_DIR/forge" \
+    "PATH=$RUN_DIR/bin:$SCRIPT_DIR/fake-forge:$UPDATE_SYSTEM_PATH"
+  cp "$RUN_DIR/env.sh" "$EVIDENCE/env.sh.txt"
+  local args=(--update -a)
+  if [[ "$entry" == prompt ]]; then args=(-a); fi
+  write_launch "$RUN_DIR/launch.sh" "$fixture" "$RUN_DIR/update/rc" "$RUN_DIR/bin/$UPDATE_APP" "${args[@]}"
+  record_run "$RUN_DIR/bin/$UPDATE_APP" "$fixture" "$RUN_DIR/forge" 160x45
+  record RUN_UPDATE_CASE "$entry $outcome"
+  log_action "update $entry $outcome: $UPDATE_APP ${args[*]} in $fixture"
+  start_session 160 45
+
+  UPDATE_PAINTED=0
+  local answered=n/a
+  if [[ "$entry" == prompt ]]; then
+    answered=no
+    update_watch 20 prompt || true
+    save_capture "$name-before"
+    if grep -qF -- "$UPDATE_PROMPT" "$CAPTURE_BASE.txt" && [[ "$(pane_field pane_dead)" == 0 ]]; then
+      tm send-keys -t "$SESSION" y Enter
+      log_action "keys y Enter"
+      answered=yes
+    fi
+  fi
+  update_watch 30 paint || true
+  local after scrollback
+  save_capture "$name-after"
+  after="$(cat "$CAPTURE_BASE.txt")"
+  # The updater output is read with the history too: tmux writes its dead-pane
+  # line at the bottom and scrolls, so a short output leaves the screen.
+  save_capture "$name-history" -S -
+  scrollback="$(cat "$CAPTURE_BASE.txt")"
+
+  local rc=running log="$RUN_DIR/update/new-app.log" lines=0 first="" newapp=absent f
+  if [[ "$(pane_field pane_dead)" == 1 ]]; then
+    rc="$(cat "$RUN_DIR/update/rc" 2>/dev/null || true)"
+    rc="${rc:-unknown}"
+  fi
+  echo "$rc" >"$EVIDENCE/$(next_seq)-$name-rc.txt"
+  if [[ -f "$log" ]]; then
+    lines="$(wc -l <"$log" | tr -d ' ')"
+    first="$(head -n 1 "$log")"
+    newapp="$lines line(s), first '$first'"
+  fi
+  for f in new-app curl updater; do
+    if [[ -f "$RUN_DIR/update/$f.log" ]]; then cp "$RUN_DIR/update/$f.log" "$EVIDENCE/$(next_seq)-$name-$f.log.txt"; fi
+  done
+
+  local marker painted=no prompt_on=no out=no
+  case "$outcome" in
+    install) marker='FAKE-UPDATER installed' ;;
+    current) marker='already up to date' ;;
+    fail) marker='network error' ;;
+  esac
+  if first_paint "$after"; then painted=yes; fi
+  if [[ "$after" == *"$UPDATE_PROMPT"* ]]; then prompt_on=yes; fi
+  if [[ "$scrollback" == *"$marker"* ]]; then out=yes; fi
+
+  local verdict=FAIL expected want="args=[-a] cwd=$fixture"
+  case "$entry/$outcome" in
+    */install)
+      expected="new-app.log 1 line '$want'; first paint, running; no prompt on screen"
+      if [[ "$lines" == 1 && "$first" == "$want" && "$painted" == yes && "$rc" == running &&
+        "$prompt_on" == no && "$answered" != no ]]; then verdict=PASS; fi
+      ;;
+    prompt/*)
+      expected="no new-app.log; prompt answered; first paint, running (same process)"
+      if [[ ! -f "$log" && "$answered" == yes && "$painted" == yes && "$rc" == running ]]; then verdict=PASS; fi
+      ;;
+    *)
+      local want_rc=0
+      if [[ "$outcome" == fail ]]; then want_rc=1; fi
+      expected="no new-app.log; exit $want_rc; never painted; '$marker' on screen"
+      if [[ ! -f "$log" && "$rc" == "$want_rc" && "$UPDATE_PAINTED" == 0 && "$out" == yes ]]; then verdict=PASS; fi
+      ;;
+  esac
+  local actual="new-app.log $newapp; rc $rc; painted ever $UPDATE_PAINTED, last screen $painted; prompt on last screen $prompt_on; '$marker' on screen $out"
+  if [[ "$entry" == prompt ]]; then actual="prompt answered $answered; $actual"; fi
+
+  quit_session
+  local line="$verdict update $entry $outcome | expected: $expected | actual: $actual | evidence $EVIDENCE"
+  echo "$line" >"$EVIDENCE/$(next_seq)-$name-result.txt"
+  log_action "$line"
+  echo "$line"
+  [[ "$verdict" == PASS ]]
+}
+
+cmd_update() {
+  command -v tmux >/dev/null 2>&1 || die "tmux is not installed"
+  if [[ "${1:-}" == all && $# == 1 ]]; then
+    # One driver process per case, so each case has its own run id and shell.
+    local e o fails=0 total=0
+    for e in "${UPDATE_ENTRIES[@]}"; do
+      for o in "${UPDATE_OUTCOMES[@]}"; do
+        total=$((total + 1))
+        "$SCRIPT_DIR/verify-tui.sh" update "$e" "$o" || fails=$((fails + 1))
+      done
+    done
+    echo "verify-tui: update all: $fails of $total cases FAIL" >&2
+    ((fails == 0)) || exit 1
+    return 0
+  fi
+  (($# == 2)) || die "update: give <entry> <outcome> (entry ${UPDATE_ENTRIES[*]}; outcome ${UPDATE_OUTCOMES[*]}) or all"
+  case " ${UPDATE_ENTRIES[*]} " in *" $1 "*) ;; *) die "update: unknown entry '$1' (${UPDATE_ENTRIES[*]})" ;; esac
+  case " ${UPDATE_OUTCOMES[*]} " in *" $2 "*) ;; *) die "update: unknown outcome '$2' (${UPDATE_OUTCOMES[*]})" ;; esac
+  # Not `|| exit 1`: that list would turn errexit off inside the case.
+  update_case "$1" "$2"
 }
 
 # ---------- scenario ----------
@@ -699,6 +1028,7 @@ case "$cmd" in
   cli) cmd_cli "$@" ;;
   scenario) cmd_scenario "$@" ;;
   calls) cmd_calls "$@" ;;
+  update) cmd_update "$@" ;;
   help | -h | --help) usage ;;
   *)
     usage >&2

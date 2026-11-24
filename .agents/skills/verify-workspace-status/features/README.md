@@ -16,9 +16,10 @@ One file per feature. Each file lists recipes with steps, the screen text to exp
 | 10 | [pr-status](pr-status.md) | PR badge states on both forges, `gx` and `gc`, a scripted transition, a failing CLI, the lookup outage, the stack position, live recipe | `scripts/verify-tui.sh` (fake forge, live) |
 | 11 | [popovers](popovers.md) | The PR popover and the commit popovers by mouse hover and click | `scripts/verify-tui.sh` (fake forge, mouse) |
 | 12 | [prs-tab](prs-tab.md) | The PRs tab (`gp`): groups, detail, folds, actions, narrow layout, outage, empty state, stacked PR chains | `scripts/verify-tui.sh` (fake forge) |
-| 13 | [multi-surface-journeys](multi-surface-journeys.md) | One user path across tree → diff → graph (`Tab`) → commit files → back | `wsctl` |
+| 13 | [update](update.md) | The three update entry paths (`ws --update`, the startup prompt `y`, `ws-dev --update`): a new install starts the new version with the same args minus `--update`; no install prints and exits, or opens the current TUI after the prompt | `scripts/verify-tui.sh update` (fake updater) |
+| 14 | [multi-surface-journeys](multi-surface-journeys.md) | One user path across tree → diff → graph (`Tab`) → commit files → back | `wsctl` |
 
-Files 9 to 12 use the driver directly: they need `scenario`, `calls` and `mouse`, which `wsctl` leaves to the driver. Their shared prelude is **Setup** in [pr-status.md](pr-status.md). File 7 is a `wsctl` file that calls the driver only for `mouse` (the run dir comes from `start`).
+Files 9 to 13 use the driver directly: 9 to 12 need `scenario`, `calls` and `mouse`, which `wsctl` leaves to the driver, and 13 needs `update`, the only command that runs an updater (a fake one). The shared prelude of 9 to 12 is **Setup** in [pr-status.md](pr-status.md); 13 needs none. File 7 is a `wsctl` file that calls the driver only for `mouse` (the run dir comes from `start`).
 
 ## Recipe conventions (wsctl files)
 
