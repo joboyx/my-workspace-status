@@ -2154,7 +2154,53 @@ fn fake_forge_cli(dir: &std::path::Path, argv: &[String]) -> Answer {
         scripts.join(&argv[0]).display().to_string(),
     ];
     full.extend_from_slice(&argv[1..]);
-    run_cli(&full, &live())
+    run_cli(&full, None, &live())
+}
+
+/// The `github-second-account` verify set: the active account (no token)
+/// cannot see `acme/app`, and the call with `octo-work`'s token sees PR
+/// `#7`. Through the account fallback, the lookup, the child list and the
+/// detail all find their answers.
+#[cfg(unix)]
+#[test]
+fn second_account_scenario_set_answers_through_the_account_fallback() {
+    use crate::tui::pr_account::{EnvTokens, GhToken, PrAccounts};
+    const APP: &str = "https://github.com/acme/app.git";
+    const BRANCH: &str = "feature/auth-refresh";
+    let dir = crate::testutil::unique_dir("ws-scenario-second-account");
+    std::fs::create_dir_all(&dir).unwrap();
+    overlay_scenario_set(&dir, "github-second-account");
+    let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fake-forge");
+    let cli = |argv: &[String], token: Option<&GhToken>| {
+        let mut full = vec![
+            "env".to_string(),
+            format!("WS_FAKE_FORGE_DIR={}", dir.display()),
+            scripts.join(&argv[0]).display().to_string(),
+        ];
+        full.extend_from_slice(&argv[1..]);
+        run_cli(&full, token.map(GhToken::env), &live())
+    };
+
+    let active = |argv: &[String]| cli(argv, None);
+    assert_eq!(
+        lookup(Some(APP), BRANCH, &active),
+        PrLookup::Failed(Some(
+            "GraphQL: Could not resolve to a Repository with the name 'acme/app'. (repository)"
+                .into()
+        )),
+        "the active account alone cannot see the repo"
+    );
+
+    let accounts = PrAccounts::new(EnvTokens::default(), None);
+    let run = |argv: &[String]| accounts.run(Some(APP), argv, &cli);
+    let pr = found_pr(lookup(Some(APP), BRANCH, &run));
+    assert_eq!(pr.number, 7);
+    assert_eq!(lookup_stack(Some(APP), &pr, None, &run), Ok(None));
+    assert!(matches!(
+        lookup_detail(APP, 7, &run),
+        PrDetailLookup::Found(_)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Every single-state verify scenario set that finds a PR also answers the
@@ -2724,20 +2770,24 @@ fn cancel_after(delay: Duration) -> std::sync::Arc<AtomicBool> {
 fn run_cli_returns_stdout_and_fails_on_exit_or_missing_program() {
     let live = live();
     assert_eq!(
-        run_cli(&sh("printf 'a\\nb'"), &live),
+        run_cli(&sh("printf 'a\\nb'"), None, &live),
         Ok("a\nb".to_string())
     );
     assert_eq!(
-        run_cli(&sh("printf 'a'; echo 'warning: old token' >&2"), &live),
+        run_cli(
+            &sh("printf 'a'; echo 'warning: old token' >&2"),
+            None,
+            &live
+        ),
         Ok("a".to_string()),
         "stderr of a zero exit is ignored"
     );
-    assert_eq!(run_cli(&sh("printf x; exit 3"), &live), Err(None));
+    assert_eq!(run_cli(&sh("printf x; exit 3"), None, &live), Err(None));
     assert_eq!(
-        run_cli(&strings(&["ws-no-such-program-for-tests"]), &live),
+        run_cli(&strings(&["ws-no-such-program-for-tests"]), None, &live),
         Err(Some("ws-no-such-program-for-tests not found".into()))
     );
-    assert_eq!(run_cli(&[], &live), Err(None));
+    assert_eq!(run_cli(&[], None, &live), Err(None));
 }
 
 #[cfg(unix)]
@@ -2749,6 +2799,7 @@ fn run_cli_keeps_the_first_stderr_line_of_a_failure() {
             &sh("echo '{\"message\":\"404\"}'; \
                      printf '\\n   \\n  glab: 404 Not found (HTTP 404)  \\nsecond line\\n' >&2; \
                      exit 1"),
+            None,
             &live
         ),
         Err(Some("glab: 404 Not found (HTTP 404)".into()))
@@ -2758,13 +2809,14 @@ fn run_cli_keeps_the_first_stderr_line_of_a_failure() {
             &sh(
                 "printf '\\033[31mHTTP 401:\\033[0m\\033[1;4m Bad\\tcredentials\\r\\n' >&2; exit 4"
             ),
+            None,
             &live
         ),
         Err(Some("HTTP 401: Bad credentials".into())),
         "escape sequences go, other control characters become spaces"
     );
     assert_eq!(
-        run_cli(&sh("printf '%0300d\\n' 0 >&2; exit 1"), &live),
+        run_cli(&sh("printf '%0300d\\n' 0 >&2; exit 1"), None, &live),
         Err(Some(format!("{}…", "0".repeat(199)))),
         "cut to 200 characters"
     );
@@ -2801,6 +2853,7 @@ fn run_cli_nulls_stdin_and_disables_prompts_and_colour() {
     let out = run_cli(
         &sh("if [ -t 0 ]; then echo tty; fi; \
              printf '%s,%s,%s' \"$GH_PROMPT_DISABLED\" \"$NO_PROMPT\" \"$NO_COLOR\""),
+        None,
         &live(),
     );
     assert_eq!(out, Ok("1,1,1".to_string()));
@@ -2808,9 +2861,30 @@ fn run_cli_nulls_stdin_and_disables_prompts_and_colour() {
 
 #[cfg(unix)]
 #[test]
+fn run_cli_sets_the_given_env_var_for_that_child_only() {
+    let show = sh("printf '%s|%s' \"$WS_TEST_ONE_CALL\" \"$*\"");
+    assert_eq!(
+        run_cli(&show, Some(("WS_TEST_ONE_CALL", "value-1")), &live()),
+        Ok("value-1|".to_string()),
+        "in the env, not on argv"
+    );
+    assert_eq!(
+        run_cli(&show, None, &live()),
+        Ok("|".to_string()),
+        "the next call does not see it"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn run_cli_kills_a_cli_that_runs_past_the_limit() {
     let started = Instant::now();
-    let out = run_cli_within(&sh("exec sleep 5"), Duration::from_millis(200), &live());
+    let out = run_cli_within(
+        &sh("exec sleep 5"),
+        None,
+        Duration::from_millis(200),
+        &live(),
+    );
     assert_eq!(out, Err(Some("timed out after 200 ms".to_string())));
     assert!(started.elapsed() < Duration::from_secs(3), "not bounded");
     assert_eq!(timed_out_reason(CLI_TIME_LIMIT), "timed out after 20 s");
@@ -2820,7 +2894,7 @@ fn run_cli_kills_a_cli_that_runs_past_the_limit() {
 #[test]
 fn run_cli_with_cancel_set_fails_without_starting() {
     let started = Instant::now();
-    let out = run_cli(&sh("exec sleep 5"), &AtomicBool::new(true));
+    let out = run_cli(&sh("exec sleep 5"), None, &AtomicBool::new(true));
     assert_eq!(out, Err(None));
     assert!(started.elapsed() < Duration::from_secs(1), "waited");
 }
@@ -2832,7 +2906,7 @@ fn run_cli_kills_a_running_cli_once_cancel_is_set() {
     let started = Instant::now();
     // The full time limit (20 s) would outlast the sleep; only the
     // cancel can end this early.
-    let out = run_cli(&sh("exec sleep 5"), &cancel);
+    let out = run_cli(&sh("exec sleep 5"), None, &cancel);
     assert_eq!(out, Err(None));
     assert!(started.elapsed() < Duration::from_secs(3), "not cancelled");
 }
@@ -2979,7 +3053,7 @@ fn empty_browser_env_falls_back_to_os_opener() {
 
 /// The real runner with a cancel flag that is never set.
 fn real_run(argv: &[String]) -> Result<String, Option<String>> {
-    run_cli(argv, &AtomicBool::new(false))
+    run_cli(argv, None, &AtomicBool::new(false))
 }
 
 /// True when `program` is installed and logged in to `host`; else

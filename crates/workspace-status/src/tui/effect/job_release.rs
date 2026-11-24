@@ -456,6 +456,7 @@ mod tests {
     use crate::tui::action::{Action, Effect};
     use crate::tui::anim::RemoteActivity;
     use crate::tui::event_loop::{apply_joined, spawn_job, JobJoinSet};
+    use crate::tui::pr_account::GhToken;
     use crate::tui::pr_status::PrState;
     use crate::tui::pull_request::PrPage;
     use crate::tui::state::AppState;
@@ -470,7 +471,11 @@ mod tests {
     /// The `gh` stand-in that panics on the worker. A test that uses it
     /// holds [`panic_hook_lock`], so the TUI panic hook tests cannot add a
     /// location to [`JOB_PANIC`] in the status while it runs.
-    fn gh_panics(_: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+    fn gh_panics(
+        _: &[String],
+        _: Option<&GhToken>,
+        _: &AtomicBool,
+    ) -> Result<String, Option<String>> {
         panic!("{JOB_PANIC}")
     }
 

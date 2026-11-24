@@ -11,7 +11,10 @@
 //! see [`super::theme::theme_id_from`] for the theme precedence. The tree
 //! focus has its own load and save ([`load_tree_focus`],
 //! [`save_tree_focus`]), keyed by [`super::viewed::workspace_store_id`].
+//! So does the `gh` account cache of the PR lookups
+//! ([`load_pr_account_cache`], [`save_pr_account_cache`]).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -46,7 +49,9 @@ const STORE_FILE_NAME: &str = "ui-state.json";
 /// ([`saved_commit_msg_lines`], [`saved_ignore_whitespace`],
 /// [`saved_tree_focus`]), never the whole file foreign. `treeFocus` maps a
 /// workspace store id to its raw focus query; a bad entry is only that
-/// workspace unset.
+/// workspace unset. `prAccountCache` maps `host/owner` to the `gh` login
+/// that last could see that owner's repos ([`load_pr_account_cache`]); it
+/// holds no token.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct StoreFile {
@@ -61,6 +66,8 @@ struct StoreFile {
     ignore_whitespace: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tree_focus: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pr_account_cache: Option<serde_json::Value>,
 }
 
 /// The view state the TUI restores at launch.
@@ -301,6 +308,54 @@ pub fn save_tree_focus(path: &Path, workspace_id: &str, query: Option<&str>) -> 
                 }
             }
         }
+    })
+}
+
+/// The `host/owner` → `gh` login cache of the PR lookups
+/// ([`super::pr_account`]).
+///
+/// Empty when the file is missing, unreadable, foreign, or has another
+/// version (the [`load_ui_state`] rules), or when `prAccountCache` is not a
+/// JSON object. An entry whose key is not `host/owner` (two non-empty
+/// segments) or whose value is not a non-empty string is dropped; keys are
+/// lower-cased.
+pub fn load_pr_account_cache(path: &Path) -> BTreeMap<String, String> {
+    let Some(parsed) = fs::read(path).ok().and_then(|bytes| parse_store(&bytes)) else {
+        return BTreeMap::new();
+    };
+    if parsed.version != UI_STATE_STORE_VERSION {
+        return BTreeMap::new();
+    }
+    let Some(entries) = parsed.pr_account_cache.as_ref().and_then(|v| v.as_object()) else {
+        return BTreeMap::new();
+    };
+    entries
+        .iter()
+        .filter_map(|(key, login)| {
+            let key = key.to_ascii_lowercase();
+            let owner_key = matches!(key.split_once('/'), Some((host, owner))
+                if !host.is_empty() && !owner.is_empty() && !owner.contains('/'));
+            let login = login.as_str().filter(|login| !login.is_empty())?;
+            owner_key.then(|| (key, login.to_string()))
+        })
+        .collect()
+}
+
+/// Persist the `host/owner` → `gh` login cache of the PR lookups as the
+/// whole `prAccountCache` key, and keep the other stored keys as they are.
+///
+/// An empty `cache` drops the key. See [`update_store`] for the create,
+/// foreign-file, and lock rules.
+pub fn save_pr_account_cache(path: &Path, cache: &BTreeMap<String, String>) -> io::Result<()> {
+    update_store(path, |file| {
+        file.pr_account_cache = (!cache.is_empty()).then(|| {
+            serde_json::Value::Object(
+                cache
+                    .iter()
+                    .map(|(key, login)| (key.clone(), login.as_str().into()))
+                    .collect(),
+            )
+        });
     })
 }
 
@@ -571,7 +626,7 @@ mod tests {
     fn save_never_overwrites_a_file_that_is_not_the_store() {
         let (dir, path) = temp_store();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let saves: [(&str, Save); 6] = [
+        let saves: [(&str, Save); 7] = [
             ("theme", |p| save_theme(p, ThemeId::Monokai)),
             ("sparkline", |p| save_activity_sparkline(p, true)),
             ("commit message lines", |p| save_commit_msg_lines(p, 6)),
@@ -580,6 +635,12 @@ mod tests {
                 save_tree_focus(p, "ws-a", Some("ABC-123"))
             }),
             ("tree focus clear", |p| save_tree_focus(p, "ws-a", None)),
+            ("PR account cache", |p| {
+                save_pr_account_cache(
+                    p,
+                    &BTreeMap::from([("github.com/acme-corp".into(), "octo-work".into())]),
+                )
+            }),
         ];
         for (name, save) in saves {
             for body in [
@@ -1017,6 +1078,63 @@ mod tests {
             assert_eq!(fs::read_to_string(&path).unwrap(), config, "{query:?}");
         }
         assert_eq!(load_tree_focus(&path, "ws-a"), None);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pr_account_cache_round_trips_and_keeps_the_other_keys() {
+        let (dir, path) = temp_store();
+        assert!(load_pr_account_cache(&path).is_empty(), "missing file");
+        save_theme(&path, ThemeId::Nord).unwrap();
+        let cache = BTreeMap::from([
+            ("github.com/acme-corp".to_string(), "octo-work".to_string()),
+            (
+                "github.example.com/infra".to_string(),
+                "octo-admin".to_string(),
+            ),
+        ]);
+        save_pr_account_cache(&path, &cache).unwrap();
+        assert_eq!(load_pr_account_cache(&path), cache);
+        assert_eq!(load_ui_state(&path).theme, Some(ThemeId::Nord));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\n  \"version\": 1,\n  \"theme\": \"nord\",\n  \"activitySparkline\": false,\n  \
+             \"prAccountCache\": {\n    \"github.com/acme-corp\": \"octo-work\",\n    \
+             \"github.example.com/infra\": \"octo-admin\"\n  }\n}\n"
+        );
+        save_pr_account_cache(&path, &BTreeMap::new()).unwrap();
+        assert!(load_pr_account_cache(&path).is_empty());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\n  \"version\": 1,\n  \"theme\": \"nord\",\n  \"activitySparkline\": false\n}\n",
+            "an empty cache drops the key"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pr_account_cache_drops_bad_entries_and_bad_files() {
+        let (dir, path) = temp_store();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "{\"version\":1,\"prAccountCache\":{\"GitHub.com/Acme-Corp\":\"octo-work\",\
+             \"github.com\":\"octo-a\",\"github.com/acme-corp/repo\":\"octo-b\",\
+             \"github.com/empty\":\"\",\"github.com/number\":7}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_pr_account_cache(&path),
+            BTreeMap::from([("github.com/acme-corp".to_string(), "octo-work".to_string())])
+        );
+        for body in [
+            "{\"version\":1,\"prAccountCache\":[\"octo-work\"]}\n",
+            "{\"version\":2,\"prAccountCache\":{\"github.com/acme-corp\":\"octo-work\"}}\n",
+            "{\"version\":1,\"prAccountCache\":{\"github.com/acme-corp\":\"octo-work\"},\"x\":1}\n",
+        ] {
+            fs::write(&path, body).unwrap();
+            assert!(load_pr_account_cache(&path).is_empty(), "{body:?}");
+        }
         let _ = fs::remove_dir_all(dir);
     }
 }

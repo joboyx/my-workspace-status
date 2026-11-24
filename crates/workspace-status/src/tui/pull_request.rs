@@ -1649,11 +1649,17 @@ pub(crate) fn reap_in_background(mut child: Child) {
 /// Stdin is null and stderr is captured, so the CLI cannot read the TUI's
 /// terminal or print over it. `GH_PROMPT_DISABLED` and `NO_PROMPT` (read by
 /// `glab`) make the CLIs fail instead of asking for input; `NO_COLOR` keeps
-/// escape codes out of the JSON. No token is passed; the CLIs use their own
-/// login. The time limit keeps a stalled CLI from holding a worker; the
-/// cancel flag keeps a running one from holding the TUI's exit.
-pub fn run_cli(argv: &[String], cancel: &AtomicBool) -> Result<String, Option<String>> {
-    run_cli_within(argv, CLI_TIME_LIMIT, cancel)
+/// escape codes out of the JSON. `env` is one more variable for this child
+/// only: the `GH_TOKEN` of another logged-in `gh` account
+/// ([`super::pr_account`]). It never goes on argv. With `None` the CLIs use
+/// their own login. The time limit keeps a stalled CLI from holding a
+/// worker; the cancel flag keeps a running one from holding the TUI's exit.
+pub fn run_cli(
+    argv: &[String],
+    env: Option<(&str, &str)>,
+    cancel: &AtomicBool,
+) -> Result<String, Option<String>> {
+    run_cli_within(argv, env, CLI_TIME_LIMIT, cancel)
 }
 
 /// Read `pipe` to its end on its own thread, so a full pipe cannot stall
@@ -1720,6 +1726,7 @@ fn timed_out_reason(limit: Duration) -> String {
 
 fn run_cli_within(
     argv: &[String],
+    env: Option<(&str, &str)>,
     limit: Duration,
     cancel: &AtomicBool,
 ) -> Result<String, Option<String>> {
@@ -1728,18 +1735,21 @@ fn run_cli_within(
     }
     let deadline = Instant::now() + limit;
     let (program, args) = argv.split_first().ok_or(None)?;
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("GH_PROMPT_DISABLED", "1")
         .env("NO_PROMPT", "1")
-        .env("NO_COLOR", "1")
-        .spawn()
-        .map_err(|error| {
-            (error.kind() == std::io::ErrorKind::NotFound).then(|| format!("{program} not found"))
-        })?;
+        .env("NO_COLOR", "1");
+    if let Some((name, value)) = env {
+        command.env(name, value);
+    }
+    let mut child = command.spawn().map_err(|error| {
+        (error.kind() == std::io::ErrorKind::NotFound).then(|| format!("{program} not found"))
+    })?;
     let stdout = read_on_thread(child.stdout.take().ok_or(None)?);
     let stderr = read_on_thread(child.stderr.take().ok_or(None)?);
     let Some(status) = wait_until(&mut child, deadline, cancel) else {

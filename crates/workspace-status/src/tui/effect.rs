@@ -74,6 +74,7 @@ use super::ops::{
     format_completed_op, format_mixed_running_op, format_running_op_scoped, FocusScope, Op,
     OpTally, RepoOpResult, RunningOp,
 };
+use super::pr_account::{GhToken, PrAccounts};
 use super::pr_groups::{PrGroup, TitleCache};
 use super::pull_request::{
     is_web_url, lookup, lookup_detail, lookup_stack, PrDetailLookup, PrLookup, PrPage, PrStack,
@@ -442,21 +443,23 @@ pub(crate) struct PrDetailJob {
     request: u64,
 }
 
-/// Forge CLI runner for PR lookups: argv and the quit flag in, stdout or
-/// the failure reason out.
-type PrCliRunner = fn(&[String], &AtomicBool) -> Result<String, Option<String>>;
+/// Forge CLI runner for PR lookups: argv, the token of the `gh` account to
+/// run as (`None`: the CLI's own login, see [`PrAccounts`]), and the quit
+/// flag in; stdout or the failure reason out.
+type PrCliRunner = fn(&[String], Option<&GhToken>, &AtomicBool) -> Result<String, Option<String>>;
 
 /// Opens a PR URL in the operator's browser; stops waiting on the quit flag.
 type PrUrlOpener = fn(&str, &AtomicBool) -> Result<(), ()>;
 
 /// Forge CLI runner a new [`Interpreter`] starts with.
 #[cfg(not(test))]
-const DEFAULT_PR_CLI: PrCliRunner = run_cli;
+const DEFAULT_PR_CLI: PrCliRunner =
+    |argv, token, cancel| run_cli(argv, token.map(GhToken::env), cancel);
 
 /// Test builds never spawn `gh` / `glab`: the default fails without a
 /// spawn, and a test that needs an answer sets a fake.
 #[cfg(test)]
-const DEFAULT_PR_CLI: PrCliRunner = |_, _| Err(None);
+const DEFAULT_PR_CLI: PrCliRunner = |_, _, _| Err(None);
 
 /// Browser opener a new [`Interpreter`] starts with.
 #[cfg(not(test))]
@@ -1114,6 +1117,10 @@ pub(crate) struct Interpreter {
     pr_badges_running: usize,
     /// Forge CLI runner ([`DEFAULT_PR_CLI`]; tests swap in a fake).
     pr_cli: PrCliRunner,
+    /// Which `gh` account runs each repository's PR calls, shared by the
+    /// PR worker jobs ([`PrAccounts::run`]). Empty rules and no store
+    /// until [`Self::set_pr_accounts`].
+    pr_accounts: Arc<PrAccounts>,
     /// Browser opener ([`DEFAULT_PR_OPENER`]; tests swap in a fake).
     pr_opener: PrUrlOpener,
     /// Set on quit. PR jobs on workers stop their CLI or opener wait at
@@ -1210,6 +1217,7 @@ impl Interpreter {
             pr_details: VecDeque::new(),
             pr_badges_running: 0,
             pr_cli: DEFAULT_PR_CLI,
+            pr_accounts: Arc::new(PrAccounts::default()),
             pr_opener: DEFAULT_PR_OPENER,
             pr_cancel: Arc::new(AtomicBool::new(false)),
             pr_title_job: LatestOnly::overlap(UserTag::PrTitles),
@@ -1223,6 +1231,12 @@ impl Interpreter {
             status_batch: StatusBatch::default(),
             dirty: false,
         }
+    }
+
+    /// Use `accounts` for the `gh` account of every later PR job: the env
+    /// token flags and the cache of the UI-state file.
+    pub(crate) fn set_pr_accounts(&mut self, accounts: PrAccounts) {
+        self.pr_accounts = Arc::new(accounts);
     }
 
     /// Stop PR lookups and opens on workers: a running forge CLI is killed,
@@ -4380,6 +4394,7 @@ impl Interpreter {
             UserTag::PullRequest => {
                 let cwd = opts.cwd.clone();
                 let cli = self.pr_cli;
+                let accounts = Arc::clone(&self.pr_accounts);
                 let cancel = Arc::clone(&self.pr_cancel);
                 if let Some((repo, branch, page)) = self.pr_opens.pop_front() {
                     let open = self.pr_opener;
@@ -4387,8 +4402,11 @@ impl Interpreter {
                         id,
                         JobRelease::Read { what: "PR open" },
                         Box::new(move || {
-                            let run = |argv: &[String]| cli(argv, &cancel);
                             let remote = remote_url_for_branch(&cwd.join(&repo), &branch);
+                            let cli = |argv: &[String], token: Option<&GhToken>| {
+                                cli(argv, token, &cancel)
+                            };
+                            let run = |argv: &[String]| accounts.run(remote.as_deref(), argv, &cli);
                             let lookup = lookup(remote.as_deref(), &branch, &run);
                             let opened = match (&lookup, page) {
                                 (PrLookup::Found(pr), PrPage::Pr) => open(&pr.url, &cancel).is_ok(),
@@ -4489,7 +4507,11 @@ impl Interpreter {
                             id,
                             JobRelease::PrDetail { job: job.clone() },
                             Box::new(move || {
-                                let run = |argv: &[String]| cli(argv, &cancel);
+                                let cli = |argv: &[String], token: Option<&GhToken>| {
+                                    cli(argv, token, &cancel)
+                                };
+                                let run =
+                                    |argv: &[String]| accounts.run(Some(&job.remote), argv, &cli);
                                 let lookup = lookup_detail(&job.remote, job.number, &run);
                                 JobOutcome::PullRequestDetail { job, lookup }
                             }),
@@ -4510,8 +4532,12 @@ impl Interpreter {
                                 branch: branch.clone(),
                             },
                             Box::new(move || {
-                                let run = |argv: &[String]| cli(argv, &cancel);
                                 let remote = remote_url_for_branch(&cwd.join(&repo), &branch);
+                                let cli = |argv: &[String], token: Option<&GhToken>| {
+                                    cli(argv, token, &cancel)
+                                };
+                                let run =
+                                    |argv: &[String]| accounts.run(remote.as_deref(), argv, &cli);
                                 let lookup = lookup(remote.as_deref(), &branch, &run);
                                 // A found PR walks its stack in the same job.
                                 let stack = match &lookup {
