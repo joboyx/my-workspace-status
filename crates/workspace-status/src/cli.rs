@@ -47,11 +47,17 @@ or --default-branch goes to stderr. --json wins when both --json and --plain\n\
 are set. -v applies to --plain only.\n\n\
 On a TTY TUI launch, if the last GitHub Release check is older than 6 hours\n\
 and a newer published release exists, the process asks whether to update\n\
-before the TUI mounts. --plain, --json, and --update skip that check.\n\n\
+before the TUI mounts. --plain, --json, and --update skip that check.\n\
+y runs the update below. When nothing new was installed, the current\n\
+version opens the TUI.\n\n\
 --update prints GitHub Release notes for versions newer than this install,\n\
-then runs the cargo-dist updater (workspace-status-update) and exits.\n\
-That run does not open the TUI or apply repo filters. A dev build\n\
-(scripts/install-dev.sh) instead rebuilds and reinstalls its checkout.\n\n\
+then runs the cargo-dist updater (workspace-status-update). After a new\n\
+install it starts the new version with the same arguments minus --update,\n\
+so `ws --update` alone opens the TUI in the current folder. When nothing\n\
+new was installed (already current, network error, installer failure),\n\
+it prints the updater's result and exits with the updater's exit code.\n\
+The --update run itself does not open the TUI or apply repo filters. A dev\n\
+build (scripts/install-dev.sh) instead rebuilds and reinstalls its checkout.\n\n\
 `ws doctor` prints the Doctor setup checkup as plain text to paste, and\n\
 exits 1 when a row fails (0 otherwise). It asks the terminal for its\n\
 capabilities only when stdin and stdout are both a TTY. To filter a repo\n\
@@ -90,7 +96,8 @@ struct Cli {
     #[arg(short = 'i', long = "tui")]
     tui: bool,
 
-    /// Print GitHub Release notes since this version, then run the updater.
+    /// Print GitHub Release notes since this version, run the updater, and
+    /// start the new version after a new install.
     #[arg(long = "update")]
     update: bool,
 

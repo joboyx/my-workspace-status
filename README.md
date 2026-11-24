@@ -79,7 +79,7 @@ curl -LsSf https://github.com/joboyx/my-workspace-status/releases/latest/downloa
 export PATH="$HOME/.local/bin:$PATH" && hash -r
 ```
 
-Update that install with `ws --update` (same as `workspace-status --update`). That prints GitHub Release notes for versions newer than the installed binary, then runs `workspace-status-update`. The installer also places that sidecar next to the binaries. On a TTY, `ws` also checks GitHub Releases at most every 6 hours and asks `workspace-status <current> → <latest> available. Update? [y/N]` before the TUI if a newer release exists (blank Enter is no). `--plain` and `--json` skip that check; `WS_STATUS_UPDATE_CHECK=0` or the config key `"updateCheck": false` turns it off.
+Update that install with `ws --update` (same as `workspace-status --update`). That prints GitHub Release notes for versions newer than the installed binary, then runs `workspace-status-update`. After a new install it starts the new version with the same arguments minus `--update`, so `ws --update` alone opens the TUI. When nothing new was installed (already current, network error, installer failure), it exits with the updater's exit code. The installer also places that sidecar next to the binaries. On a TTY, `ws` also checks GitHub Releases at most every 6 hours and asks `workspace-status <current> → <latest> available. Update? [y/N]` before the TUI if a newer release exists (blank Enter is no). `y` runs the same update; when nothing new was installed, the current version opens. `--plain` and `--json` skip that check; `WS_STATUS_UPDATE_CHECK=0` or the config key `"updateCheck": false` turns it off.
 
 Windows:
 
@@ -111,7 +111,7 @@ Install this checkout next to the released `ws` without touching it:
 
     ./scripts/install-dev.sh
 
-That builds into `target/dev-install` and installs `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` into `~/.local/bin` (`WS_DEV_BIN_DIR` overrides). `ws-dev --version` shows the git sha. `ws-dev --update` rebuilds and reinstalls this checkout: the update shim points at it, so moving or deleting the checkout breaks `ws-dev --update` (run the script again from the new place). Dev builds skip the release update prompt. `./scripts/install-dev.sh --uninstall` removes only the `-dev` names.
+That builds into `target/dev-install` and installs `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` into `~/.local/bin` (`WS_DEV_BIN_DIR` overrides). `ws-dev --version` shows the git sha. `ws-dev --update` rebuilds and reinstalls this checkout, then starts the new build the same way. The update shim points at this checkout, so moving or deleting the checkout breaks `ws-dev --update` (run the script again from the new place). Dev builds skip the release update prompt. `./scripts/install-dev.sh --uninstall` removes only the `-dev` names.
 
 ## Agents
 

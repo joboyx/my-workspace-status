@@ -68,7 +68,7 @@ The CLI produces:
 - `--default-branch`: Switch non-default branches to their default branch, then pull
 - `--plain`: Force plain text report (required for agent runs unless `--json` — avoids interactive TUI hang)
 - `--json`: Print the workspace snapshot as JSON (also disables the TUI)
-- `--update`: Print GitHub Release notes newer than this install, then run the cargo-dist updater (`workspace-status-update`) and exit (never opens the TUI)
+- `--update`: Print GitHub Release notes newer than this install, then run the cargo-dist updater (`workspace-status-update`). After a new install it starts the new version with the same args minus `--update` (so `ws --update` alone opens the TUI); with no new install it exits with the updater's code (humans only: a new install can open the TUI)
 - `-i` / `--tui`: Force interactive TUI (humans only; never from agents)
 
 **Interactive TUI (humans only):** On a TTY (without `-v` / `-p` / `-d` / `--plain` / `--json`), the CLI opens a ratatui TUI and blocks on keyboard input. Agents must always pass `--plain` or `--json` (see Instructions). Force TUI with `-i` / `--tui` only for interactive human use.
