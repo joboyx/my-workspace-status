@@ -6,6 +6,8 @@
 //! [`CHECK_INTERVAL`]. The fetch is `curl` GET of GitHub Releases `latest`
 //! (4s timeout; missing `curl` is a quiet failure). `--update` reuses
 //! the same `curl` helper for the Releases list; it does not call this prompt.
+//! A `y` answer runs the same update as `--update`: a new install starts the
+//! new version with the same args; no new install opens the current TUI.
 //! A dev build ([`crate::DEV_BUILD`]) never runs this check: it must not
 //! offer to replace itself with a published release. `WS_STATUS_UPDATE_CHECK=0`
 //! turns the check off.
@@ -85,7 +87,9 @@ pub(crate) fn github_get(url: &str, max_time_secs: &str) -> Result<String, Strin
 pub enum StartupUpdateOffer {
     /// Open the TUI (not due, current, failed, declined, or no TTY).
     Continue,
-    /// User accepted. Caller should run the cargo-dist sidecar.
+    /// User accepted. Caller runs the cargo-dist sidecar
+    /// (`update::run_startup_update`): a new install starts the new
+    /// version; otherwise the current TUI opens.
     RunUpdater,
 }
 

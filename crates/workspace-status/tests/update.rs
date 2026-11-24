@@ -1,4 +1,5 @@
-//! `--update` prints newer GitHub Release notes, then execs the cargo-dist sidecar.
+//! `--update` prints newer GitHub Release notes, then runs the cargo-dist
+//! sidecar; after a new install it starts the new version with the other args.
 
 use std::fs;
 #[cfg(unix)]
@@ -175,6 +176,174 @@ fn update_missing_sidecar_is_nonzero() {
         "stderr should mention the sidecar: {err}"
     );
     let _ = fs::remove_dir_all(empty);
+}
+
+/// A copied app in `bin/` beside a fake `workspace-status-update`, for the
+/// cases that check what happens after the updater returns.
+///
+/// The copy keeps the test from touching `target/`: an install swaps
+/// `new_version` (a script that logs its pid, cwd and args) over `app`.
+#[cfg(unix)]
+struct UpdateCase {
+    dir: PathBuf,
+    app: PathBuf,
+    new_version: PathBuf,
+    work: PathBuf,
+}
+
+/// Exit code of the "new version" script, so a test can see it forwarded.
+#[cfg(unix)]
+const NEW_VERSION_EXIT: i32 = 23;
+
+#[cfg(unix)]
+impl UpdateCase {
+    /// Copy `src` to `bin/<name>` in a new temp dir; write the "new version"
+    /// script and the cwd dir. The updater comes from [`UpdateCase::updater`].
+    fn new(src: &Path, name: &str) -> Self {
+        let dir = temp_dir();
+        let bin_dir = dir.join("bin");
+        let work = dir.join("work");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        let app = bin_dir.join(name);
+        fs::copy(src, &app).unwrap();
+        let new_version = dir.join("new-version");
+        write_script(
+            &new_version,
+            &format!(
+                "#!/bin/sh\necho \"new-version pid=$$ cwd=$(pwd -P) argc=$#\"\n\
+                 for a in \"$@\"; do echo \"arg=$a\"; done\nexit {NEW_VERSION_EXIT}\n"
+            ),
+        );
+        Self {
+            dir,
+            app,
+            new_version,
+            work,
+        }
+    }
+
+    /// Write the fake updater beside the app: prints `say`, swaps the new
+    /// version over the app when `swap`, then exits with `code`.
+    fn updater(&self, say: &str, swap: bool, code: i32) {
+        let swap = if swap {
+            format!(
+                "/bin/mv '{}' '{}'\n",
+                self.new_version.display(),
+                self.app.display()
+            )
+        } else {
+            String::new()
+        };
+        write_script(
+            &self.app.with_file_name("workspace-status-update"),
+            &format!("#!/bin/sh\necho {say}\n{swap}exit {code}\n"),
+        );
+    }
+
+    /// Run the app with `args` from the `work/` dir; return its output and
+    /// the pid of the spawned process.
+    fn run(&self, args: &[&str]) -> (std::process::Output, u32) {
+        use std::process::Stdio;
+        let child = Command::new(&self.app)
+            .args(args)
+            .current_dir(&self.work)
+            .env("PATH", self.app.parent().unwrap())
+            .env("HOME", &self.dir)
+            .env("XDG_CONFIG_HOME", self.dir.join("xdg-config"))
+            .env("XDG_STATE_HOME", self.dir.join("xdg-state"))
+            .env(
+                "WS_STATUS_UPDATE_CHECK_STORE",
+                self.dir.join("update-check.json"),
+            )
+            .env_remove("WS_STATUS_WORKSPACE")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn copied app");
+        let pid = child.id();
+        let out = child.wait_with_output().expect("wait for copied app");
+        (out, pid)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UpdateCase {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn update_install_relaunches_new_version_with_args_minus_update() {
+    let case = UpdateCase::new(&bin(), "workspace-status");
+    case.updater("installed", true, 0);
+    let (out, pid) = case.run(&["--update", "--plain", "repo-x"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let cwd = case.work.canonicalize().unwrap();
+    // `pid={pid}` is the spawned pid: Unix replaces the process (exec), it
+    // does not spawn the new version and wait for it.
+    assert_eq!(
+        stdout,
+        format!(
+            "installed\nnew-version pid={pid} cwd={} argc=2\narg=--plain\narg=repo-x\n",
+            cwd.display()
+        ),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(NEW_VERSION_EXIT));
+}
+
+#[cfg(unix)]
+#[test]
+fn ws_update_alone_relaunches_new_version_without_args() {
+    let case = UpdateCase::new(&ws_bin(), "ws");
+    case.updater("installed", true, 0);
+    let (out, pid) = case.run(&["--update"]);
+    let cwd = case.work.canonicalize().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!(
+            "installed\nnew-version pid={pid} cwd={} argc=0\n",
+            cwd.display()
+        ),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(NEW_VERSION_EXIT));
+}
+
+#[cfg(unix)]
+#[test]
+fn update_current_does_not_relaunch() {
+    let case = UpdateCase::new(&bin(), "workspace-status");
+    case.updater("already-up-to-date", false, 0);
+    let (out, _) = case.run(&["--update", "--plain"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "already-up-to-date\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn update_fail_does_not_relaunch_and_forwards_exit() {
+    let case = UpdateCase::new(&bin(), "workspace-status");
+    case.updater("network-error", false, 19);
+    let (out, _) = case.run(&["--update", "--plain"]);
+    assert_eq!(out.status.code(), Some(19));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "network-error\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn update_fail_after_file_change_does_not_relaunch() {
+    let case = UpdateCase::new(&bin(), "workspace-status");
+    case.updater("partial-install", true, 19);
+    let (out, _) = case.run(&["--update", "--plain"]);
+    assert_eq!(out.status.code(), Some(19));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "partial-install\n");
 }
 
 #[test]

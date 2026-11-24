@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::env;
+use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -17,7 +18,7 @@ use crate::snapshot::{
     repo_snapshots_from_workspace, serialize_workspace_snapshot, visible_workspace_snapshot,
     RepoSnapshot,
 };
-use crate::update::run_self_update;
+use crate::update::{run_self_update, run_startup_update};
 use crate::update_check::{offer_startup_update, StartupUpdateOffer};
 use clap::{Parser, Subcommand};
 use std::sync::LazyLock;
@@ -220,9 +221,10 @@ where
 
 pub fn cli_main() -> ExitCode {
     crate::crash_report::install_crash_report_hook();
-    let cli = parse_cli(env::args_os()).unwrap_or_else(|err| err.exit());
+    let args: Vec<OsString> = env::args_os().collect();
+    let cli = parse_cli(args.iter().cloned()).unwrap_or_else(|err| err.exit());
     if cli.update {
-        return run_self_update();
+        return run_self_update(&args);
     }
     // Git runs in its own process group, out of reach of a terminal signal:
     // make SIGINT / SIGTERM / SIGHUP stop it before ws exits.
@@ -247,13 +249,15 @@ pub fn cli_main() -> ExitCode {
     if cli.command == Some(Command::Doctor) {
         return ExitCode::from(crate::doctor_cli::run(&cwd));
     }
-    match run(cli, cwd) {
+    match run(cli, cwd, &args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => ExitCode::from(code),
     }
 }
 
-fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
+/// `args` is the full process argv; the startup update passes it on to the
+/// new version.
+fn run(cli: Cli, cwd: PathBuf, args: &[OsString]) -> Result<(), u8> {
     let filter_repos = sorted_unique(
         cli.filter_repos
             .iter()
@@ -303,9 +307,12 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
     };
     if crate::tui::should_open_tui(io::stdout().is_terminal(), flags) {
         if offer_startup_update(&settings) == StartupUpdateOffer::RunUpdater {
-            // Unix exec replaces the process. If the sidecar returns (Windows, or
-            // exec failed), continue into the TUI instead of exiting.
-            let _ = run_self_update();
+            // A new install starts the new version: on Unix it replaces this
+            // process; elsewhere its exit code ends this run. No new install,
+            // or a failed relaunch, opens the current TUI.
+            if let Some(code) = run_startup_update(args) {
+                return if code == 0 { Ok(()) } else { Err(code) };
+            }
         }
         let snapshot = crate::tui::collect_full_snapshot(
             &cwd,
