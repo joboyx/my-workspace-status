@@ -21,6 +21,9 @@
 //! (`.agents/skills/verify-workspace-status/scripts/wsctl`) spawns only
 //! through that driver, so the driver's guards cover it; it must never start
 //! the binary or a tmux session itself (`wsctl_routes_spawns_through_the_driver`).
+//! The driver's `update` command is the one path that runs an updater: only a
+//! fake one beside a copy of the binary in the run dir
+//! (`verify_driver_update_runs_only_fakes_beside_copies`).
 //! Recipe: [docs/architecture.md](../../../docs/architecture.md).
 
 const RELEASE_YML: &str = include_str!("../../../.github/workflows/release.yml");
@@ -717,6 +720,83 @@ fn verify_driver_isolates_forge_theme_and_git() {
     assert!(
         VERIFY_SH.contains("export WS_FAKE_FORGE_DIR=") && VERIFY_SH.contains("/fake-forge:$PATH"),
         "scripts/verify-tui.sh must put scripts/fake-forge first on PATH for --fake-forge"
+    );
+}
+
+#[test]
+fn verify_driver_update_runs_only_fakes_beside_copies() {
+    // `update` is the one driver command that runs an updater. It must run a
+    // fake one beside a copy of the binary, inside the run, with the env file
+    // isolation of every run, and never reach an installed binary, the
+    // operator's bin dirs or a real install. `cli` keeps refusing `--update`.
+    let section = VERIFY_SH
+        .split("# ---------- update ----------")
+        .nth(1)
+        .and_then(|rest| rest.split("# ---------- ").next())
+        .expect("scripts/verify-tui.sh has an update section");
+    let code = strip_comment_lines(section);
+    for pin in [
+        // Copies, never the checkout's target binaries in place.
+        "cp \"$src\" \"$RUN_DIR/bin/$UPDATE_APP\"",
+        "cp \"$src\" \"$RUN_DIR/next/$UPDATE_APP\"",
+        "\"$RUN_DIR/bin/$UPDATE_APP\" \"${args[@]}\"",
+        // The fakes sit beside the copy, so the sibling lookup finds them.
+        ">\"$RUN_DIR/bin/$updater\"",
+        ">\"$RUN_DIR/bin/curl\"",
+        // The env file isolation of every run, with the run's bin/ first and
+        // system dirs only after it.
+        "write_env_file \"$RUN_DIR/env.sh\"",
+        "\"PATH=$RUN_DIR/bin:$SCRIPT_DIR/fake-forge:$UPDATE_SYSTEM_PATH\"",
+        "UPDATE_SYSTEM_PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+        // Only the prompt case drops the fresh update-check stamp.
+        "if [[ \"$entry\" != prompt ]]; then stamp_update_check; fi",
+        // The dev build has its own target dir.
+        "DEV_TARGET=\"$REPO_ROOT/target/verify-dev\"",
+        "WS_STATUS_DEV_BUILD=verify CARGO_TARGET_DIR=\"$DEV_TARGET\" cargo build --locked -p workspace-status",
+    ] {
+        assert!(
+            code.contains(pin),
+            "scripts/verify-tui.sh update must keep `{pin}` (fakes beside a copy, run isolation)"
+        );
+    }
+    for banned in [
+        "$PATH",
+        "$HOME",
+        "~/",
+        ".local/bin",
+        ".cargo/bin",
+        "install-dev.sh",
+        "command -v ws",
+        "command -v workspace-status",
+        " -j",
+        "--jobs",
+    ] {
+        assert!(
+            !code.contains(banned),
+            "scripts/verify-tui.sh update must not use `{banned}` (an installed binary, the \
+             operator's PATH or bin dirs, a real install, or a parallel cargo build)"
+        );
+    }
+    // `update_source` runs in `$(...)`, where errexit is off: each build
+    // must stop the case itself, or a failed build tests an older binary.
+    assert_eq!(
+        code.matches(") >&2 ||\n        die \"cargo build failed for $bin\"")
+            .count(),
+        2,
+        "scripts/verify-tui.sh update must `|| die` after both of its cargo builds"
+    );
+    let cli = VERIFY_SH
+        .split("cmd_cli() {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("scripts/verify-tui.sh defines cmd_cli");
+    assert!(
+        cli.contains("--update | --update=* | --tui) die"),
+        "scripts/verify-tui.sh cli must keep refusing --update (update is the one updater path)"
+    );
+    assert!(
+        VERIFY_SH.contains("update) cmd_update \"$@\" ;;"),
+        "scripts/verify-tui.sh must dispatch the update command"
     );
 }
 

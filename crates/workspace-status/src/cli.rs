@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::env;
+use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -17,7 +18,7 @@ use crate::snapshot::{
     repo_snapshots_from_workspace, serialize_workspace_snapshot, visible_workspace_snapshot,
     RepoSnapshot,
 };
-use crate::update::run_self_update;
+use crate::update::{run_self_update, run_startup_update};
 use crate::update_check::{offer_startup_update, StartupUpdateOffer};
 use clap::{Parser, Subcommand};
 use std::sync::LazyLock;
@@ -46,11 +47,17 @@ or --default-branch goes to stderr. --json wins when both --json and --plain\n\
 are set. -v applies to --plain only.\n\n\
 On a TTY TUI launch, if the last GitHub Release check is older than 6 hours\n\
 and a newer published release exists, the process asks whether to update\n\
-before the TUI mounts. --plain, --json, and --update skip that check.\n\n\
+before the TUI mounts. --plain, --json, and --update skip that check.\n\
+y runs the update below. When nothing new was installed, the current\n\
+version opens the TUI.\n\n\
 --update prints GitHub Release notes for versions newer than this install,\n\
-then runs the cargo-dist updater (workspace-status-update) and exits.\n\
-That run does not open the TUI or apply repo filters. A dev build\n\
-(scripts/install-dev.sh) instead rebuilds and reinstalls its checkout.\n\n\
+then runs the cargo-dist updater (workspace-status-update). After a new\n\
+install it starts the new version with the same arguments minus --update,\n\
+so `ws --update` alone opens the TUI in the current folder. When nothing\n\
+new was installed (already current, network error, installer failure),\n\
+it prints the updater's result and exits with the updater's exit code.\n\
+The --update run itself does not open the TUI or apply repo filters. A dev\n\
+build (scripts/install-dev.sh) instead rebuilds and reinstalls its checkout.\n\n\
 `ws doctor` prints the Doctor setup checkup as plain text to paste, and\n\
 exits 1 when a row fails (0 otherwise). It asks the terminal for its\n\
 capabilities only when stdin and stdout are both a TTY. To filter a repo\n\
@@ -89,7 +96,8 @@ struct Cli {
     #[arg(short = 'i', long = "tui")]
     tui: bool,
 
-    /// Print GitHub Release notes since this version, then run the updater.
+    /// Print GitHub Release notes since this version, run the updater, and
+    /// start the new version after a new install.
     #[arg(long = "update")]
     update: bool,
 
@@ -220,9 +228,10 @@ where
 
 pub fn cli_main() -> ExitCode {
     crate::crash_report::install_crash_report_hook();
-    let cli = parse_cli(env::args_os()).unwrap_or_else(|err| err.exit());
+    let args: Vec<OsString> = env::args_os().collect();
+    let cli = parse_cli(args.iter().cloned()).unwrap_or_else(|err| err.exit());
     if cli.update {
-        return run_self_update();
+        return run_self_update(&args);
     }
     // Git runs in its own process group, out of reach of a terminal signal:
     // make SIGINT / SIGTERM / SIGHUP stop it before ws exits.
@@ -247,13 +256,15 @@ pub fn cli_main() -> ExitCode {
     if cli.command == Some(Command::Doctor) {
         return ExitCode::from(crate::doctor_cli::run(&cwd));
     }
-    match run(cli, cwd) {
+    match run(cli, cwd, &args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => ExitCode::from(code),
     }
 }
 
-fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
+/// `args` is the full process argv; the startup update passes it on to the
+/// new version.
+fn run(cli: Cli, cwd: PathBuf, args: &[OsString]) -> Result<(), u8> {
     let filter_repos = sorted_unique(
         cli.filter_repos
             .iter()
@@ -303,9 +314,12 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
     };
     if crate::tui::should_open_tui(io::stdout().is_terminal(), flags) {
         if offer_startup_update(&settings) == StartupUpdateOffer::RunUpdater {
-            // Unix exec replaces the process. If the sidecar returns (Windows, or
-            // exec failed), continue into the TUI instead of exiting.
-            let _ = run_self_update();
+            // A new install starts the new version: on Unix it replaces this
+            // process; elsewhere its exit code ends this run. No new install,
+            // or a failed relaunch, opens the current TUI.
+            if let Some(code) = run_startup_update(args) {
+                return if code == 0 { Ok(()) } else { Err(code) };
+            }
         }
         let snapshot = crate::tui::collect_full_snapshot(
             &cwd,

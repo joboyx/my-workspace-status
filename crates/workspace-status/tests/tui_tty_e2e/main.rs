@@ -39,3 +39,5 @@ mod seed;
 mod slow_git;
 #[cfg(unix)]
 mod support;
+#[cfg(unix)]
+mod update_support;
