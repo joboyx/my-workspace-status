@@ -726,19 +726,23 @@ needs_build() {
 }
 
 # update_source ENTRY: print the binary a case copies, built first when stale.
-# dev: the dev-marked ws in target/verify-dev; else the checkout's ws.
+# dev: the dev-marked ws in target/verify-dev; else the checkout's ws. The
+# caller runs it in $(...), where errexit is off, so each build has its own
+# `|| die`: a failed build must not leave an older binary to test.
 update_source() {
   local bin
   if [[ "$1" == dev ]]; then
     bin="$DEV_TARGET/debug/ws"
     if needs_build "$bin"; then
       echo "verify-tui: building the dev-marked ws into $DEV_TARGET (slow the first time)" >&2
-      (cd "$REPO_ROOT" && WS_STATUS_DEV_BUILD=verify CARGO_TARGET_DIR="$DEV_TARGET" cargo build --locked -p workspace-status) >&2
+      (cd "$REPO_ROOT" && WS_STATUS_DEV_BUILD=verify CARGO_TARGET_DIR="$DEV_TARGET" cargo build --locked -p workspace-status) >&2 ||
+        die "cargo build failed for $bin"
     fi
   else
     bin="$(dirname "$(binary_path)")/ws"
     if needs_build "$bin"; then
-      (cd "$REPO_ROOT" && cargo build -p workspace-status --bin ws) >&2
+      (cd "$REPO_ROOT" && cargo build -p workspace-status --bin ws) >&2 ||
+        die "cargo build failed for $bin"
     fi
   fi
   [[ -x "$bin" ]] || die "build finished but $bin is missing"

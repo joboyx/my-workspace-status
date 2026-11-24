@@ -777,6 +777,14 @@ fn verify_driver_update_runs_only_fakes_beside_copies() {
              operator's PATH or bin dirs, a real install, or a parallel cargo build)"
         );
     }
+    // `update_source` runs in `$(...)`, where errexit is off: each build
+    // must stop the case itself, or a failed build tests an older binary.
+    assert_eq!(
+        code.matches(") >&2 ||\n        die \"cargo build failed for $bin\"")
+            .count(),
+        2,
+        "scripts/verify-tui.sh update must `|| die` after both of its cargo builds"
+    );
     let cli = VERIFY_SH
         .split("cmd_cli() {")
         .nth(1)
