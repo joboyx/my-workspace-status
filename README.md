@@ -1,4 +1,4 @@
-# workspace-status
+# <img src="docs/images/icon.svg" alt="workspace-status icon: three repo rows on a dark tile, each ending in a sync mark: a grey check, a green up arrow and a red down arrow" width="48" height="48" align="absmiddle"> workspace-status
 
 Git status for every repo and worktree under the current directory, in one TUI.
 

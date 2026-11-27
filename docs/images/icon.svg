@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+<title>workspace-status (ws)</title>
+<!-- Slate theme (the launch default): surface #11151b, border_dim #2b3442, muted #8a94a3, added #78c48d, deleted #e27a7a. -->
+<rect x="4" y="4" width="120" height="120" rx="26" fill="#11151b"/>
+<rect x="5" y="5" width="118" height="118" rx="25" fill="none" stroke="#2b3442" stroke-width="2"/>
+<!-- Three repo rows: the name, then its sync mark. -->
+<g fill="#2b3442">
+<rect x="22" y="27" width="48" height="14" rx="3"/>
+<rect x="22" y="57" width="38" height="14" rx="3"/>
+<rect x="22" y="87" width="44" height="14" rx="3"/>
+</g>
+<!-- In sync: the check, muted. -->
+<path d="M81 34L90 43L106 25" fill="none" stroke="#8a94a3" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<!-- Ahead: the up arrow, added green. Behind: the down arrow, deleted red. -->
+<path d="M94 50L108 64H99.5V78H88.5V64H80Z" fill="#78c48d"/>
+<path d="M94 108L80 94H88.5V80H99.5V94H108Z" fill="#e27a7a"/>
+</svg>
